@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlelab-api"
+version = "0.1.0"
+description = "Laboratório local de backtests Binance Spot"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.121.2", "uvicorn==0.38.0", "pydantic-settings==2.12.0",
+  "pymongo==4.15.4", "redis==7.0.1", "httpx==0.28.1", "python-multipart==0.0.20",
+]
+
+[dependency-groups]
+dev = ["pytest==9.0.1", "mongomock==4.3.0", "ruff==0.14.5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires real MongoDB and Redis"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.hatch.build.targets.wheel]
+packages = ["candlelab"]

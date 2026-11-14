@@ -1,0 +1,66 @@
+x-app: &app
+  build: .
+  image: candlelab-api:0.1.0
+  environment: &environment
+    CANDLELAB_MONGO_URI: mongodb://mongo:27017
+    CANDLELAB_MONGO_DATABASE: ${CANDLELAB_MONGO_DATABASE:-candlelab}
+    CANDLELAB_REDIS_URL: redis://redis:6379/0
+    CANDLELAB_CORS_ORIGINS: '${CANDLELAB_CORS_ORIGINS:-["http://localhost:3000","http://localhost:5173"]}'
+    CANDLELAB_MAX_UPLOAD_BYTES: ${CANDLELAB_MAX_UPLOAD_BYTES:-33554432}
+    CANDLELAB_MAX_CANDLES: ${CANDLELAB_MAX_CANDLES:-100000}
+    CANDLELAB_BATCH_SIZE: ${CANDLELAB_BATCH_SIZE:-500}
+    CANDLELAB_CACHE_TTL: ${CANDLELAB_CACHE_TTL:-300}
+    CANDLELAB_LEASE_SECONDS: ${CANDLELAB_LEASE_SECONDS:-60}
+    CANDLELAB_POLL_SECONDS: ${CANDLELAB_POLL_SECONDS:-1}
+    CANDLELAB_BINANCE_TIMEOUT: ${CANDLELAB_BINANCE_TIMEOUT:-10}
+    CANDLELAB_BINANCE_RETRIES: ${CANDLELAB_BINANCE_RETRIES:-3}
+    CANDLELAB_MAX_RETRY_AFTER: ${CANDLELAB_MAX_RETRY_AFTER:-30}
+    CANDLELAB_INSTRUMENTS: '${CANDLELAB_INSTRUMENTS:-[{"symbol":"BTCUSDT","base_asset":"BTC"},{"symbol":"ETHUSDT","base_asset":"ETH"}]}'
+  depends_on:
+    mongo:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  restart: unless-stopped
+  init: true
+
+services:
+  api:
+    <<: *app
+    ports:
+      - '127.0.0.1:${API_PORT:-8000}:8000'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  worker:
+    <<: *app
+    command: [python, -m, candlelab.worker]
+    healthcheck:
+      test: [CMD, python, -c, "from candlelab.config import Settings; from candlelab.infrastructure.store import MongoStore; MongoStore(Settings()).ping()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  mongo:
+    image: mongo:7.0.16
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --maxmemory, 128mb, --maxmemory-policy, allkeys-lru, --save, '', --appendonly, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
