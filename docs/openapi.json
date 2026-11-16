@@ -1534,6 +1534,10 @@
             "type": "string",
             "title": "Id"
           },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
           "source": {
             "type": "string",
             "const": "BINANCE_SPOT",
@@ -1585,6 +1589,7 @@
         "type": "object",
         "required": [
           "id",
+          "name",
           "source",
           "symbol",
           "interval",

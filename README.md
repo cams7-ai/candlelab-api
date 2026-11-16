@@ -111,6 +111,14 @@ Timeout e retentativas são limitados; `Retry-After` é respeitado. Se a espera 
 exceder o orçamento configurado, retorna 503 para nova consulta posterior.
 Falhas de página ou sequência não publicam datasets parciais.
 
+O campo `name` do dataset guarda o nome original do arquivo JSON (incluindo a extensão).
+Na aquisição pela Binance, é gerado como `simbolo_intervalo_inicio_fim`, por exemplo
+`btcusdt_1m_2026-11-13T1300Z_2026-11-13T1800Z`, com datas em UTC. Quando uma data
+não é informada, usa-se a primeira ou última abertura retornada. Ao reutilizar um
+snapshot com o mesmo conteúdo, o nome é atualizado para o da aquisição mais recente;
+a identidade e os candles permanecem os mesmos. Conjuntos antigos sem `name` recebem
+um nome gerado a partir do par, intervalo e período nas respostas da API.
+
 Copie o `id` do dataset retornado e crie uma sessão:
 
 ```bash

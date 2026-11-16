@@ -5,6 +5,7 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from candlelab.domain.numbers import DECIMAL_PATTERN, decimal_input, wire
+from candlelab.domain.dataset_names import dataset_name
 
 DecimalString = Annotated[str, Field(pattern=DECIMAL_PATTERN)]
 Timestamp = Annotated[int, Field(ge=0)]
@@ -82,6 +83,7 @@ class ErrorResponse(BaseModel):
 
 class Dataset(BaseModel):
     id: str
+    name: str
     source: Literal["BINANCE_SPOT"]
     symbol: str
     interval: str
@@ -93,6 +95,21 @@ class Dataset(BaseModel):
     last_open_time_ms: Timestamp
     content_hash: str
     imported_at: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_name(cls, data):
+        if isinstance(data, dict) and not data.get("name"):
+            data = {
+                **data,
+                "name": dataset_name(
+                    data["symbol"],
+                    data["interval"],
+                    data["first_open_time_ms"],
+                    data["last_open_time_ms"],
+                ),
+            }
+        return data
 
 
 class CandleResponse(BaseModel):

@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 
 from candlelab.domain.candles import MAX_TIME_MS, Candle, content_hash
 from candlelab.domain.errors import AppError, invalid
+from candlelab.domain.dataset_names import dataset_name
 
 
 def now():
@@ -63,6 +64,15 @@ class MongoStore:
         self.db.command("ping")
 
     def publish_dataset(self, candles, instrument, interval, provenance):
+        query = provenance.get("query", {})
+        name = (
+            provenance.get("filename") if provenance.get("mode") == "UPLOAD" else None
+        ) or dataset_name(
+            instrument.symbol,
+            interval,
+            query.get("startTime", candles[0].open_time_ms),
+            query.get("endTime", candles[-1].open_time_ms),
+        )
         hashed = content_hash(candles)
         identity = {
             "source": "BINANCE_SPOT",
@@ -86,7 +96,9 @@ class MongoStore:
         }
         try:
             self.db.datasets.update_one(
-                {"_id": dataset_id}, {"$setOnInsert": document}, upsert=True
+                {"_id": dataset_id},
+                {"$setOnInsert": document, "$set": {"name": name}},
+                upsert=True,
             )
         except DuplicateKeyError:
             pass
