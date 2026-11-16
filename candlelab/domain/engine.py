@@ -16,6 +16,12 @@ def simulate(
 ):
     spec, params = resolve(strategy_id, parameters)
     strategy = spec.factory(params)
+    if strategy_id in ("ARBITRAGE@1", "PAIRS_TRADING@1"):
+        from candlelab.domain.external_engine import simulate_external
+
+        return simulate_external(
+            candles, strategy, initial_cash, fee_rate, quantity_step, heartbeat
+        )
     cash, qty, cost, fees, realized = initial_cash, Decimal(0), Decimal(0), Decimal(0), Decimal(0)
     peak, max_drawdown = initial_cash, Fraction(0)
     buys = sells = wins = 0
@@ -61,18 +67,53 @@ def simulate(
                 side, signal_id = pending["side"], pending["id"]
                 reason = (
                     "POSITION_ALREADY_OPEN"
-                    if side == "BUY" and qty
+                    if side == "BUY" and qty and strategy_id != "DCA@1"
                     else ("NO_POSITION" if side == "SELL" and not qty else None)
                 )
                 new_qty = qty
+                order = pending.get("order") or {}
+                price = candle.open
+                if order.get("limit_price") is not None:
+                    limit = order["limit_price"]
+                    if order.get("maker"):
+                        row = strategy.row(candle)
+                        if not row["maker_buy_filled" if side == "BUY" else "maker_sell_filled"]:
+                            reason = "PASSIVE_ORDER_NOT_FILLED"
+                        price = limit
+                    elif (side == "BUY" and candle.low > limit) or (
+                        side == "SELL" and candle.high < limit
+                    ):
+                        reason = "LIMIT_NOT_TOUCHED"
+                    else:
+                        price = (
+                            min(candle.open, limit) if side == "BUY" else max(candle.open, limit)
+                        )
+                if strategy_id == "SCALPING@1" or (
+                    strategy_id == "MARKET_MAKING@1" and not order.get("maker")
+                ):
+                    row = strategy.row(candle)
+                    price = Decimal(row["ask" if side == "BUY" else "bid"])
                 if not reason and side == "BUY":
                     # Exact rational floor prevents a division rounding across the step boundary.
-                    units = Fraction(cash) / (
-                        Fraction(candle.open) * (1 + Fraction(fee_rate)) * Fraction(quantity_step)
+                    budget = (
+                        min(Fraction(cash), Fraction(initial_cash) / order["installments"])
+                        if order.get("installments")
+                        else Fraction(cash)
+                    )
+                    units = budget / (
+                        Fraction(price) * (1 + Fraction(fee_rate)) * Fraction(quantity_step)
                     )
                     new_qty = (units.numerator // units.denominator) * quantity_step
                     if new_qty == 0:
                         reason = "ZERO_QUANTITY"
+                if not reason and strategy_id in ("SCALPING@1", "MARKET_MAKING@1"):
+                    capacity = Decimal(strategy.row(candle)["capacity_base"])
+                    if side == "BUY":
+                        new_qty = min(new_qty, (capacity // quantity_step) * quantity_step)
+                        if new_qty == 0:
+                            reason = "ZERO_QUANTITY"
+                    elif new_qty > capacity:
+                        reason = "INSUFFICIENT_LIQUIDITY"
                 if reason:
                     event(
                         "skipped",
@@ -83,14 +124,14 @@ def simulate(
                         reason=reason,
                     )
                 else:
-                    gross = new_qty * candle.open
+                    gross = new_qty * price
                     fee = gross * fee_rate
                     delta = -(gross + fee) if side == "BUY" else gross - fee
                     before_qty = qty
                     cash += delta
                     fees += fee
                     if side == "BUY":
-                        qty, cost = new_qty, gross + fee
+                        qty, cost = qty + new_qty, cost + gross + fee
                         buys += 1
                     else:
                         pnl = gross - fee - cost
@@ -106,9 +147,13 @@ def simulate(
                         "fill",
                         side,
                         candle.open_time_ms,
-                        candle.open_time_ms,
+                        candle.close_time_ms
+                        if order.get("limit_price") is not None
+                        and not order.get("maker")
+                        and price != candle.open
+                        else candle.open_time_ms,
                         signal_id=signal_id,
-                        price=wire(candle.open),
+                        price=wire(price),
                         quantity=wire(new_qty),
                         fee=wire(fee),
                         gross=wire(gross),
@@ -127,6 +172,8 @@ def simulate(
                             "cost_basis_after": wire(cost),
                         }
                     )
+                    if hasattr(strategy, "on_fill"):
+                        strategy.on_fill(side, price)
                 pending = None
             evaluation = strategy.on_close(candle)
             observed_ready |= evaluation.ready
@@ -155,6 +202,7 @@ def simulate(
                     evaluation_index=count - 1,
                 )
                 evaluations[-1]["signal_id"] = pending["id"]
+                pending = {**pending, "order": evaluation.order}
             value = cash + qty * candle.close
             if value > Decimal("1e48"):
                 raise invalid("financial", "Patrimônio excede o limite de 10^48 USDT.")

@@ -94,7 +94,7 @@ def test_errors_and_catalog_openapi(client, rows):
         == 503
     )
     catalog = client.get("/api/v1/strategies").json()["items"]
-    assert len(catalog) == 4
+    assert len(catalog) == 22
     assert catalog[0]["parameters_schema"]["properties"]["short_window"]["type"] == "integer"
     assert "5m" in client.get("/api/v1/instruments").json()["items"][0]["intervals"]
     schema = client.get("/openapi.json").json()

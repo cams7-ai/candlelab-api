@@ -1,4 +1,4 @@
-# CandleLab API
+# CandleLab API 0.2.0
 
 Backend local e monousuário para importar candles Binance Spot e executar backtests
 reproduzíveis com carteiras independentes. Python 3.11+, FastAPI/Pydantic, PyMongo e
@@ -48,7 +48,7 @@ uv export --frozen --no-dev --no-emit-project --format requirements-txt --output
 Configuração: `.env.example`, prefixo `CANDLELAB_`. Listas usam JSON. Para outros
 pares Spot cotados em USDT, configure `CANDLELAB_INSTRUMENTS` com `symbol`,
 `base_asset`, `quote_asset: "USDT"`, `intervals`, `quantity_step` e `version`.
-`1m` e `5m` são os intervalos fixos suportados. O passo é uma hipótese do simulador,
+`1m`, `5m` e `1h` são os intervalos fixos suportados. O passo é uma hipótese do simulador,
 sem afirmar equivalência com os filtros atuais da exchange. A execução guarda o
 passo e sua versão; alterações posteriores no catálogo não mudam tarefas criadas.
 Origens permitidas pelo navegador estão em `CANDLELAB_CORS_ORIGINS`.
@@ -259,3 +259,15 @@ CANDLELAB_ACCEPTANCE_FILE=/caminho/arquivo.json uv run pytest tests/test_accepta
 Não há autenticação: a configuração fornecida publica somente em localhost para
 uso local. Upload e simulação sobre snapshots existentes funcionam sem internet;
 a instalação inicial de dependências e imagens requer acesso aos registries.
+
+## Versão 0.2.0
+
+O [prompt desta versão](docs/prompt_261116_v0.2.0.md) foi criado antes das alterações e executado neste projeto. Consulte o [guia de estratégias e importação](docs/estrategias_v0.2.0.md) para as 18 novas opções, regras, padrões e hipóteses de execução. As quatro opções anteriores permanecem disponíveis. A entrada auxiliar é importada por processamento, com snapshot persistido e validação de cobertura temporal; não há dados externos fabricados automaticamente. Suporte adicional a candles de 1 hora.
+
+Veja os [resultados de validação 0.2.0](docs/validacao_v0.2.0.md).
+
+## Versão 0.2.0
+
+O [prompt desta versão](docs/prompt_261116_v0.2.0.md) foi criado antes das alterações e executado neste projeto. Consulte o [guia de estratégias e importação](docs/estrategias_v0.2.0.md) para as 18 novas opções, regras, padrões e hipóteses de execução. As quatro opções anteriores permanecem disponíveis. A entrada auxiliar é importada por processamento, com snapshot persistido e validação de cobertura temporal; não há dados externos fabricados automaticamente. Suporte adicional a candles de 1 hora.
+
+Veja os [resultados de validação 0.2.0](docs/validacao_v0.2.0.md).

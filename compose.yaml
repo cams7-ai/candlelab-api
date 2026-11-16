@@ -1,6 +1,6 @@
 x-app: &app
   build: .
-  image: candlelab-api:0.1.0
+  image: candlelab-api:0.2.0
   environment: &environment
     CANDLELAB_MONGO_URI: mongodb://mongo:27017
     CANDLELAB_MONGO_DATABASE: ${CANDLELAB_MONGO_DATABASE:-candlelab}

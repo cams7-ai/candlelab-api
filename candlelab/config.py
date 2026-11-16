@@ -9,7 +9,7 @@ class Instrument(BaseModel):
     symbol: str
     base_asset: str
     quote_asset: str = "USDT"
-    intervals: list[str] = ["1m", "5m"]
+    intervals: list[str] = ["1m", "5m", "1h"]
     quantity_step: str = "0.000001"
     version: str = "SIMULATED_STEP_V1"
 

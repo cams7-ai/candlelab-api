@@ -130,3 +130,53 @@ def test_redis_cache_and_mongodb_fallback(real_store, rows):
     finally:
         redis.delete(key)
         redis.close()
+
+
+def test_all_tutorial_runs_persist_with_real_mongodb(real_store):
+    import math
+    from candlelab.domain.strategies import catalog
+    from candlelab.schemas import RunRequest
+    from test_tutorial import candles, auxiliary
+
+    service = Service(real_store.settings, real_store, None)
+    data = candles([round(100 + 8 * math.sin(i / 5) + i / 20, 4) for i in range(120)])
+    raw = [
+        [
+            c.open_time_ms,
+            str(c.open),
+            str(c.high),
+            str(c.low),
+            str(c.close),
+            str(c.base_volume),
+            c.close_time_ms,
+            "100",
+            1,
+            "1",
+            "1",
+            "0",
+        ]
+        for c in data
+    ]
+    dataset = service.upload(json.dumps(raw).encode(), "synthetic.json", "BTCUSDT", "1m")
+    sess = real_store.create_session(
+        dict(
+            name="All tutorial strategies",
+            dataset_id=dataset["id"],
+            initial_cash="1000",
+            fee_rate="0.001",
+        )
+    )
+    for item in catalog()[4:]:
+        parameters = (
+            {"auxiliary_json": json.dumps(auxiliary(data))} if item["required_data"] else {}
+        )
+        run = service.run(
+            sess["id"], RunRequest(strategy_id=item["id"], parameters=parameters), None
+        )
+        assert Worker(real_store).once()
+        result = real_store.run(run["id"])
+        assert result["status"] == "completed", (item["id"], result.get("error"))
+        assert result["parameters"] == run["parameters"]
+        assert real_store.db.series.count_documents({"run_id": run["id"], "kind": "equity"}) == len(
+            data
+        )

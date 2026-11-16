@@ -6,7 +6,7 @@ from decimal import Decimal
 from candlelab.domain.errors import invalid
 from candlelab.domain.numbers import decimal_input, wire
 
-INTERVALS = {"1m": 60_000, "5m": 300_000}
+INTERVALS = {"1m": 60_000, "5m": 300_000, "1h": 3_600_000}
 MAX_TIME_MS = 253402300799999
 DECIMAL_FIELDS = {
     1: "open",

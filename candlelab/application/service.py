@@ -29,13 +29,33 @@ class Service:
         return self.store.publish_dataset(candles, instrument, request.interval, provenance)
 
     def run(self, session_id, request, key):
-        _, parameters = resolve(request.strategy_id, request.parameters)
+        spec, parameters = resolve(request.strategy_id, request.parameters)
         session = self.store.session(session_id)
         dataset = self.store.dataset(session["dataset_id"])
         instrument = self.settings.instrument(dataset["symbol"], dataset["interval"])
+        if spec.required_data:
+            from candlelab.domain.tutorial_data import rows_from_json
+
+            rows = rows_from_json(parameters.auxiliary_json, request.strategy_id.split("@")[0])
+            times = {c.open_time_ms for c in self.store.candles(dataset["id"])}
+            if set(rows) != times:
+                raise invalid(
+                    "auxiliary_json",
+                    "Forneça exatamente uma observação por abertura do dataset, sem faltas ou timestamps extras.",
+                )
+            if (
+                request.strategy_id in ("PAIRS_TRADING@1", "MOMENTUM_RANKING@1")
+                and dataset["symbol"] != "BTCUSDT"
+            ):
+                raise invalid("strategy_id", "Esta estratégia relativa exige dataset BTCUSDT.")
         policy = {
-            "engine_version": ENGINE_VERSION,
-            "execution_policy": EXECUTION_POLICY,
+            "engine_version": ENGINE_VERSION if spec.category == "legacy" else "CANDLELAB_ENGINE@2",
+            "strategy_data_policy": "AUXILIARY_OPEN_SNAPSHOT@1"
+            if spec.required_data
+            else "OHLCV@1",
+            "execution_policy": EXECUTION_POLICY
+            if spec.category == "legacy"
+            else "TUTORIAL_NEXT_OPEN_LIMITS_COLLATERAL@1",
             "numeric_policy": NUMERIC_POLICY,
             "quantity_step": instrument.quantity_step,
             "instrument_version": instrument.version,

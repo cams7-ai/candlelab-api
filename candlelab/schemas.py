@@ -157,6 +157,7 @@ class EventPoint(BaseModel):
     side: Literal["BUY", "SELL"]
     open_time_ms: Timestamp
     occurred_at_ms: Timestamp
+    asset: str | None = None
     signal_id: str | None = None
     price: DecimalString | None = None
     quantity: DecimalString | None = None
@@ -182,6 +183,10 @@ class InstrumentResponse(BaseModel):
 
 
 class StrategyResponse(BaseModel):
+    category: Literal["legacy", "individual", "combination"] = "legacy"
+    rules: str = ""
+    limitations: str = ""
+    required_data: list[str] = []
     id: str
     name: str
     parameters_schema: dict[str, Any]

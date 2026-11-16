@@ -1,20 +1,14 @@
 """Registro de estratégias; indicadores incrementais sem acesso à carteira."""
 
-from collections import deque
-from dataclasses import dataclass
 from decimal import Decimal, localcontext
-from typing import Annotated, Protocol
+from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator, field_validator
+from pydantic import Field, model_validator, field_validator
 
 from candlelab.domain.errors import invalid
+from candlelab.domain.indicators import MovingAverage, RSI
+from candlelab.domain.strategy_types import Parameters, Window, Evaluation, StrategySpec
 from candlelab.domain.numbers import INDICATOR_CONTEXT, decimal_input, wire
-
-Window = Annotated[StrictInt, Field(ge=1, le=10000)]
-
-
-class Parameters(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 class CrossParameters(Parameters):
@@ -79,67 +73,6 @@ class FilterParameters(CrossParameters):
         return wire(decimal_input(value, "rsi_confirmation_min"))
 
 
-class MovingAverage:
-    def __init__(self, window, exponential=False):
-        self.window = window
-        self.exponential = exponential
-        self.history = deque()
-        self.total = Decimal(0)
-        self.value = None
-
-    def update(self, close):
-        if self.exponential and self.value is not None:
-            alpha = Decimal(2) / (self.window + 1)
-            self.value = alpha * close + (1 - alpha) * self.value
-        else:
-            self.history.append(close)
-            self.total += close
-            if len(self.history) > self.window:
-                self.total -= self.history.popleft()
-            if len(self.history) == self.window:
-                self.value = self.total / self.window
-        return self.value
-
-
-class RSI:
-    def __init__(self, period):
-        self.period = period
-        self.previous = None
-        self.count = 0
-        self.gain = Decimal(0)
-        self.loss = Decimal(0)
-
-    def update(self, close):
-        if self.previous is None:
-            self.previous = close
-            return None
-        delta = close - self.previous
-        self.previous = close
-        self.count += 1
-        gain, loss = max(delta, Decimal(0)), max(-delta, Decimal(0))
-        if self.count <= self.period:
-            self.gain += gain
-            self.loss += loss
-            if self.count < self.period:
-                return None
-            self.gain /= self.period
-            self.loss /= self.period
-        else:
-            self.gain = (self.gain * (self.period - 1) + gain) / self.period
-            self.loss = (self.loss * (self.period - 1) + loss) / self.period
-        return (
-            Decimal(50) if self.gain + self.loss == 0 else 100 * self.gain / (self.gain + self.loss)
-        )
-
-
-@dataclass(frozen=True)
-class Evaluation:
-    values: dict
-    ready: bool
-    side: str | None
-    reason: str
-
-
 class IncrementalStrategy(Protocol):
     def on_close(self, candle) -> Evaluation: ...
 
@@ -196,13 +129,6 @@ class RSIStrategy:
             return Evaluation({"rsi": current}, ready, side, reason)
 
 
-@dataclass(frozen=True)
-class StrategySpec:
-    name: str
-    parameters: type[Parameters]
-    factory: object
-
-
 REGISTRY = {
     "SMA_CROSS@1": StrategySpec("Cruzamento SMA", CrossParameters, CrossStrategy),
     "EMA_CROSS@1": StrategySpec(
@@ -222,8 +148,19 @@ def resolve(strategy_id, parameters):
 
     spec = REGISTRY[strategy_id]
     try:
-        return spec, spec.parameters.model_validate(parameters)
-    except ValidationError as exc:
+        parsed = spec.parameters.model_validate(parameters)
+        if spec.required_data:
+            from candlelab.domain.tutorial_data import rows_from_json
+
+            rows_from_json(parsed.auxiliary_json, strategy_id.split("@")[0])
+        if strategy_id == "MACHINE_LEARNING@1" and Decimal(parsed.sell_probability) >= Decimal(
+            parsed.buy_probability
+        ):
+            raise ValueError("Exija sell_probability < buy_probability.")
+        if strategy_id == "PAIRS_TRADING@1" and Decimal(parsed.stop_z) <= Decimal(parsed.entry_z):
+            raise ValueError("Exija entry_z < stop_z.")
+        return spec, parsed
+    except (ValidationError, ValueError) as exc:
         raise invalid("parameters", str(exc)) from None
 
 
@@ -234,6 +171,15 @@ def catalog():
             "name": spec.name,
             "parameters_schema": spec.parameters.model_json_schema(),
             "defaults": spec.parameters().model_dump(),
+            "category": spec.category,
+            "rules": spec.rules,
+            "limitations": spec.limitations,
+            "required_data": spec.required_data,
         }
         for key, spec in REGISTRY.items()
     ]
+
+
+from candlelab.domain.tutorial import register  # noqa: E402
+
+register(REGISTRY)

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "CandleLab API",
-    "version": "1.0.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/health": {
@@ -1692,6 +1692,17 @@
             "minimum": 0.0,
             "title": "Occurred At Ms"
           },
+          "asset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset"
+          },
           "signal_id": {
             "anyOf": [
               {
@@ -2206,6 +2217,34 @@
       },
       "StrategyResponse": {
         "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "individual",
+              "combination"
+            ],
+            "title": "Category",
+            "default": "legacy"
+          },
+          "rules": {
+            "type": "string",
+            "title": "Rules",
+            "default": ""
+          },
+          "limitations": {
+            "type": "string",
+            "title": "Limitations",
+            "default": ""
+          },
+          "required_data": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Required Data",
+            "default": []
+          },
           "id": {
             "type": "string",
             "title": "Id"

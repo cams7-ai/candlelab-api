@@ -110,7 +110,7 @@ def create_app(settings=None, store=None, binance=None, cache=None):
 
     app = FastAPI(
         title="CandleLab API",
-        version="1.0.0",
+        version="0.2.0",
         lifespan=lifespan,
         responses={status: {"model": ErrorResponse} for status in (404, 409, 422, 502, 503)},
     )
