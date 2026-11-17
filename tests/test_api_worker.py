@@ -373,3 +373,84 @@ def test_delete_session_retries_partial_cleanup(client, store, rows, monkeypatch
     store.delete_session(sess["id"])
     assert store.db.sessions.find_one({"id": sess["id"]}) is None
     assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+
+
+def test_delete_dataset_cascades_sessions_and_runs(client, store, rows):
+    dataset, sess = prepare(client, rows)
+    second_session = session(client, dataset["id"]).json()
+    other_dataset = upload(client, rows, symbol="ETHUSDT").json()
+    other_session = session(client, other_dataset["id"]).json()
+    body = {"strategy_id": "SMA_CROSS@1", "parameters": {"short_window": 2, "long_window": 3}}
+    completed = client.post(f"/api/v1/sessions/{sess['id']}/runs", json=body).json()
+    assert Worker(store).once()
+    running = client.post(f"/api/v1/sessions/{second_session['id']}/runs", json=body).json()
+    job = store.claim()
+    queued = client.post(f"/api/v1/sessions/{sess['id']}/runs", json=body).json()
+    other = client.post(f"/api/v1/sessions/{other_session['id']}/runs", json=body).json()
+    assert client.get(f"/api/v1/datasets/{dataset['id']}/candles").status_code == 200
+    endpoint = f"/api/v1/datasets/{dataset['id']}"
+    assert client.delete(endpoint).status_code == 204
+    assert client.get(endpoint).status_code == 404
+    assert client.get(endpoint + "/candles").status_code == 404
+    assert client.delete(endpoint).status_code == 404
+    assert client.get("/api/v1/datasets").json()["items"] == [other_dataset]
+    for deleted_session in (sess, second_session):
+        path = f"/api/v1/sessions/{deleted_session['id']}"
+        assert client.get(path).status_code == 404
+        assert client.get(path + "/runs").status_code == 404
+        assert client.post(path + "/runs", json=body).status_code == 404
+    for run in (completed, running, queued):
+        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 404
+        assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    with pytest.raises(AppError, match="Posse"):
+        store.renew(job)
+    assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) == 0
+    assert store.db.acquisitions.count_documents({"dataset_id": dataset["id"]}) == 0
+    assert client.get(f"/api/v1/runs/{other['id']}").status_code == 200
+    assert client.get(f"/api/v1/datasets/{other_dataset['id']}/candles").json()["items"]
+    assert session(client, dataset["id"]).status_code == 404
+    reimported = upload(client, rows)
+    assert reimported.status_code == 200
+    assert reimported.json()["id"] == dataset["id"]
+    assert client.get(endpoint + "/candles").json()["items"]
+    assert store.db.sessions.count_documents({"dataset_id": dataset["id"]}) == 0
+
+
+def test_delete_dataset_racing_session_creation(client, store, rows, monkeypatch):
+    dataset = upload(client, rows).json()
+    original = store.db.sessions.insert_one
+
+    def insert_after_deletion(doc):
+        store.delete_dataset(dataset["id"])
+        return original(doc)
+
+    monkeypatch.setattr(store.db.sessions, "insert_one", insert_after_deletion)
+    assert session(client, dataset["id"]).status_code == 404
+    assert store.db.sessions.count_documents({"dataset_id": dataset["id"]}) == 0
+
+
+def test_delete_dataset_retries_partial_cleanup(client, store, rows, monkeypatch):
+    from pymongo.errors import AutoReconnect
+
+    dataset, sess = prepare(client, rows)
+    run = client.post(
+        f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
+    ).json()
+    assert Worker(store).once()
+
+    def unavailable(query):
+        raise AutoReconnect()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store.db.candles, "delete_many", unavailable)
+        with pytest.raises(AutoReconnect):
+            store.delete_dataset(dataset["id"])
+    assert store.db.datasets.find_one({"id": dataset["id"]})["status"] == "deleting"
+    assert client.get("/api/v1/datasets").json()["items"] == []
+    store.delete_dataset(dataset["id"])
+    assert store.db.datasets.find_one({"id": dataset["id"]}) is None
+    assert store.db.sessions.find_one({"id": sess["id"]}) is None
+    assert store.db.runs.find_one({"id": run["id"]}) is None
+    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) == 0
+    assert store.db.acquisitions.count_documents({"dataset_id": dataset["id"]}) == 0

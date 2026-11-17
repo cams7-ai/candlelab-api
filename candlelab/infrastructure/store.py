@@ -146,6 +146,22 @@ class MongoStore:
             raise AppError("NOT_FOUND", "Dataset não encontrado.", status=404)
         return clean(doc)
 
+    def delete_dataset(self, dataset_id):
+        dataset = self.db.datasets.find_one_and_update(
+            {"id": dataset_id}, {"$set": {"status": "deleting"}}
+        )
+        if not dataset:
+            raise AppError("NOT_FOUND", "Dataset não encontrado.", status=404)
+        for session in self.db.sessions.find({"dataset_id": dataset_id}, {"id": 1}):
+            try:
+                self.delete_session(session["id"])
+            except AppError as exc:
+                if exc.code != "NOT_FOUND":
+                    raise
+        self.db.candles.delete_many({"dataset_id": dataset_id})
+        self.db.acquisitions.delete_many({"dataset_id": dataset_id})
+        self.db.datasets.delete_one({"id": dataset_id, "status": "deleting"})
+
     def candles(self, dataset_id):
         for doc in self.db.candles.find({"dataset_id": dataset_id}).sort("open_time_ms", ASCENDING):
             yield Candle.from_document(doc)
@@ -174,6 +190,13 @@ class MongoStore:
         self.dataset(data["dataset_id"])
         doc = {"id": uuid4().hex, **data}
         self.db.sessions.insert_one(doc.copy())
+        try:
+            self.dataset(data["dataset_id"])
+        except AppError:
+            # Dataset deletion may race with insertion after the initial check.
+            if self.db.sessions.find_one({"id": doc["id"]}):
+                self.delete_session(doc["id"])
+            raise
         return doc
 
     def run(self, run_id):
@@ -227,6 +250,7 @@ class MongoStore:
             )
         try:
             self.session(session_id)
+            self.dataset(session["dataset_id"])
         except AppError:
             # Session deletion may race with insertion after the initial check.
             self.db.runs.delete_one({"id": doc["id"]})

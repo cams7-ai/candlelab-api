@@ -212,6 +212,11 @@ def create_app(settings=None, store=None, binance=None, cache=None):
     def datasets(page: Annotated[Pagination, Depends()]):
         return store.page("datasets", {"status": "published"}, page.limit, page.cursor)
 
+    @app.delete(prefix + "/datasets/{dataset_id}", status_code=204)
+    def delete_dataset(dataset_id: str):
+        store.delete_dataset(dataset_id)
+        return Response(status_code=204)
+
     @app.get(prefix + "/datasets/{dataset_id}", response_model=Dataset)
     def dataset(dataset_id: str):
         return store.dataset(dataset_id)
