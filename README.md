@@ -378,9 +378,3 @@ a instalação inicial de dependências e imagens requer acesso aos registries.
 O [prompt desta versão](docs/prompt_261116_v0.2.0.md) foi criado antes das alterações e executado neste projeto. Consulte o [guia de estratégias e importação](docs/estrategias_v0.2.0.md) para as 18 novas opções, regras, padrões e hipóteses de execução. As quatro opções anteriores permanecem disponíveis. A entrada auxiliar é importada por processamento, com snapshot persistido e validação de cobertura temporal; não há dados externos fabricados automaticamente. Suporte adicional a candles de 1 hora.
 
 Veja os [resultados de validação 0.2.0](docs/validacao_v0.2.0.md).
-
-## Versão 0.2.0
-
-O [prompt desta versão](docs/prompt_261116_v0.2.0.md) foi criado antes das alterações e executado neste projeto. Consulte o [guia de estratégias e importação](docs/estrategias_v0.2.0.md) para as 18 novas opções, regras, padrões e hipóteses de execução. As quatro opções anteriores permanecem disponíveis. A entrada auxiliar é importada por processamento, com snapshot persistido e validação de cobertura temporal; não há dados externos fabricados automaticamente. Suporte adicional a candles de 1 hora.
-
-Veja os [resultados de validação 0.2.0](docs/validacao_v0.2.0.md).

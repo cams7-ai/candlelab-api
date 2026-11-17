@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -120,7 +120,7 @@ def create_app(settings=None, store=None, binance=None, cache=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Idempotency-Key"],
     )
 
@@ -263,6 +263,11 @@ def create_app(settings=None, store=None, binance=None, cache=None):
     def runs(session_id: str, page: Annotated[Pagination, Depends()]):
         store.session(session_id)
         return store.page("runs", {"session_id": session_id}, page.limit, page.cursor)
+
+    @app.delete(prefix + "/runs/{run_id}", status_code=204)
+    def delete_run(run_id: str):
+        store.delete_run(run_id)
+        return Response(status_code=204)
 
     @app.get(prefix + "/runs/{run_id}", response_model=Run)
     def run(run_id: str):

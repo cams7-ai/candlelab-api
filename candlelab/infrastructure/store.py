@@ -168,6 +168,16 @@ class MongoStore:
             raise AppError("NOT_FOUND", "Processamento não encontrado.", status=404)
         return clean(doc)
 
+    def delete_run(self, run_id):
+        run = self.run(run_id)
+        if run["status"] not in ("completed", "failed"):
+            raise AppError(
+                "RUN_ACTIVE", "Aguarde o término do processamento para excluir.", status=409
+            )
+        # Remove results first so an interrupted deletion can safely be retried.
+        self.db.series.delete_many({"run_id": run_id})
+        self.db.runs.delete_one({"id": run_id, "status": {"$in": ["completed", "failed"]}})
+
     def create_run(self, session_id, strategy_id, parameters, key, policy):
         session = self.session(session_id)
         dataset = self.dataset(session["dataset_id"])

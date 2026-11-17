@@ -247,3 +247,39 @@ def test_worker_renews_lease_while_engine_runs(client, store, rows, monkeypatch)
     monkeypatch.setattr("candlelab.worker.simulate", slow_engine)
     Worker(store).once()
     assert store.run(created["id"])["status"] == "completed"
+
+
+def test_delete_run_removes_results_and_preserves_session(client, store, rows):
+    dataset, sess = prepare(client, rows)
+    path = f"/api/v1/sessions/{sess['id']}/runs"
+    body = {"strategy_id": "SMA_CROSS@1", "parameters": {"short_window": 2, "long_window": 3}}
+    run = client.post(path, json=body).json()
+    other = client.post(path, json=body).json()
+    endpoint = f"/api/v1/runs/{run['id']}"
+    assert client.delete(endpoint).status_code == 409
+    assert Worker(store).once()
+    assert Worker(store).once()
+    assert store.db.series.count_documents({"run_id": run["id"]}) > 0
+    assert client.delete(endpoint).status_code == 204
+    assert client.get(endpoint).status_code == 404
+    assert client.delete(endpoint).status_code == 404
+    assert client.get(endpoint + "/series?kind=equity").status_code == 404
+    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    assert [r["id"] for r in client.get(path).json()["items"]] == [other["id"]]
+    assert store.db.series.count_documents({"run_id": other["id"]}) > 0
+    assert client.get(f"/api/v1/sessions/{sess['id']}").json() == sess
+    assert client.get(f"/api/v1/datasets/{dataset['id']}").status_code == 200
+    store.db.runs.update_one({"id": other["id"]}, {"$set": {"status": "failed"}})
+    assert client.delete(f"/api/v1/runs/{other['id']}").status_code == 204
+
+
+def test_delete_cors_preflight(client):
+    response = client.options(
+        "/api/v1/runs/example",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "DELETE",
+        },
+    )
+    assert response.status_code == 200
+    assert "DELETE" in response.headers["access-control-allow-methods"]
