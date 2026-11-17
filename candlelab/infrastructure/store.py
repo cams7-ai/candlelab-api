@@ -151,10 +151,24 @@ class MongoStore:
             yield Candle.from_document(doc)
 
     def session(self, session_id):
-        doc = self.db.sessions.find_one({"id": session_id})
+        doc = self.db.sessions.find_one({"id": session_id, "deleting": {"$ne": True}})
         if not doc:
             raise AppError("NOT_FOUND", "Sessão não encontrada.", status=404)
         return clean(doc)
+
+    def delete_session(self, session_id):
+        session = self.db.sessions.find_one_and_update(
+            {"id": session_id}, {"$set": {"deleting": True}}
+        )
+        if not session:
+            raise AppError("NOT_FOUND", "Sessão não encontrada.", status=404)
+        # Fence workers before removing results. Keep the session until cleanup
+        # finishes so a failed deletion can be retried.
+        self.db.runs.update_many({"session_id": session_id}, {"$set": {"status": "deleting"}})
+        for run in self.db.runs.find({"session_id": session_id}, {"id": 1}):
+            self.db.series.delete_many({"run_id": run["id"]})
+        self.db.runs.delete_many({"session_id": session_id})
+        self.db.sessions.delete_one({"id": session_id})
 
     def create_session(self, data):
         self.dataset(data["dataset_id"])
@@ -164,7 +178,7 @@ class MongoStore:
 
     def run(self, run_id):
         doc = self.db.runs.find_one({"id": run_id})
-        if not doc:
+        if not doc or doc["status"] == "deleting":
             raise AppError("NOT_FOUND", "Processamento não encontrado.", status=404)
         return clean(doc)
 
@@ -211,6 +225,13 @@ class MongoStore:
                 self.db.runs.find_one({"session_id": session_id, "idempotency_key": key}),
                 request_hash,
             )
+        try:
+            self.session(session_id)
+        except AppError:
+            # Session deletion may race with insertion after the initial check.
+            self.db.runs.delete_one({"id": doc["id"]})
+            self.db.series.delete_many({"run_id": doc["id"]})
+            raise
         return doc
 
     @staticmethod
@@ -279,6 +300,13 @@ class MongoStore:
                         )
                     ]
                 )
+                try:
+                    self.renew(job)
+                except AppError:
+                    self.db.series.delete_many(
+                        {"run_id": job["id"], "attempt_id": job["attempt_id"]}
+                    )
+                    return False
         updated = self.db.runs.update_one(
             self.ownership(job),
             {
@@ -292,6 +320,8 @@ class MongoStore:
                 }
             },
         )
+        if not updated.matched_count:
+            self.db.series.delete_many({"run_id": job["id"], "attempt_id": job["attempt_id"]})
         return bool(updated.matched_count)
 
     def fail(self, job, error):

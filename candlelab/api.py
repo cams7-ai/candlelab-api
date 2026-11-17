@@ -245,7 +245,12 @@ def create_app(settings=None, store=None, binance=None, cache=None):
 
     @app.get(prefix + "/sessions", response_model=Page[Session])
     def sessions(page: Annotated[Pagination, Depends()]):
-        return store.page("sessions", {}, page.limit, page.cursor)
+        return store.page("sessions", {"deleting": {"$ne": True}}, page.limit, page.cursor)
+
+    @app.delete(prefix + "/sessions/{session_id}", status_code=204)
+    def delete_session(session_id: str):
+        store.delete_session(session_id)
+        return Response(status_code=204)
 
     @app.get(prefix + "/sessions/{session_id}", response_model=Session)
     def session(session_id: str):

@@ -283,3 +283,93 @@ def test_delete_cors_preflight(client):
     )
     assert response.status_code == 200
     assert "DELETE" in response.headers["access-control-allow-methods"]
+
+
+def test_delete_session_cascades_all_run_states(client, store, rows):
+    dataset, sess = prepare(client, rows)
+    other_session = session(client, dataset["id"]).json()
+    body = {"strategy_id": "SMA_CROSS@1", "parameters": {"short_window": 2, "long_window": 3}}
+    path = f"/api/v1/sessions/{sess['id']}"
+    completed = client.post(path + "/runs", json=body).json()
+    assert Worker(store).once()
+    running = client.post(path + "/runs", json=body).json()
+    old_job = store.claim()
+    assert old_job["id"] == running["id"]
+    queued = client.post(path + "/runs", json=body).json()
+    failed = client.post(path + "/runs", json=body).json()
+    store.db.runs.update_one({"id": failed["id"]}, {"$set": {"status": "failed"}})
+    other = client.post(f"/api/v1/sessions/{other_session['id']}/runs", json=body).json()
+    assert client.delete(path).status_code == 204
+    assert client.get(path).status_code == 404
+    assert client.get(path + "/runs").status_code == 404
+    assert client.post(path + "/runs", json=body).status_code == 404
+    assert client.delete(path).status_code == 404
+    for run in (completed, running, queued, failed):
+        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 404
+        assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    assert store.db.runs.count_documents({"session_id": sess["id"]}) == 0
+    with pytest.raises(AppError, match="Posse"):
+        store.renew(old_job)
+    assert store.fail(old_job, {}) == 0
+    assert client.get(f"/api/v1/runs/{other['id']}").status_code == 200
+    assert client.get(f"/api/v1/sessions/{other_session['id']}").status_code == 200
+    assert client.get(f"/api/v1/datasets/{dataset['id']}").status_code == 200
+
+
+def test_delete_session_fences_inflight_results(client, store, rows, monkeypatch):
+    _, sess = prepare(client, rows)
+    run = client.post(
+        f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
+    ).json()
+    original = store.db.series.insert_many
+
+    def insert_after_deletion(docs):
+        store.delete_session(sess["id"])
+        return original(docs)
+
+    monkeypatch.setattr(store.db.series, "insert_many", insert_after_deletion)
+    assert Worker(store).once()
+    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    assert store.db.runs.count_documents({"session_id": sess["id"]}) == 0
+
+
+def test_delete_session_racing_run_creation(client, store, rows, monkeypatch):
+    _, sess = prepare(client, rows)
+    original = store.db.runs.insert_one
+
+    def insert_after_deletion(doc):
+        store.delete_session(sess["id"])
+        return original(doc)
+
+    monkeypatch.setattr(store.db.runs, "insert_one", insert_after_deletion)
+    assert (
+        client.post(
+            f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
+        ).status_code
+        == 404
+    )
+    assert store.db.runs.count_documents({"session_id": sess["id"]}) == 0
+
+
+def test_delete_session_retries_partial_cleanup(client, store, rows, monkeypatch):
+    from pymongo.errors import AutoReconnect
+
+    _, sess = prepare(client, rows)
+    run = client.post(
+        f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
+    ).json()
+    assert Worker(store).once()
+
+    def unavailable(query):
+        raise AutoReconnect()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store.db.series, "delete_many", unavailable)
+        with pytest.raises(AutoReconnect):
+            store.delete_session(sess["id"])
+    assert store.db.sessions.find_one({"id": sess["id"]})["deleting"] is True
+    assert store.db.runs.find_one({"id": run["id"]})["status"] == "deleting"
+    assert store.claim() is None
+    store.delete_session(sess["id"])
+    assert store.db.sessions.find_one({"id": sess["id"]}) is None
+    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
