@@ -215,10 +215,13 @@ class MongoStore:
         self.db.series.delete_many({"run_id": run_id})
         self.db.runs.delete_one({"id": run_id, "status": {"$in": ["completed", "failed"]}})
 
-    def create_run(self, session_id, strategy_id, parameters, key, policy):
+    def create_run(self, session_id, strategy_id, parameters, key, policy, auxiliary_filename=None):
         session = self.session(session_id)
         dataset = self.dataset(session["dataset_id"])
-        request_hash = digest({"strategy_id": strategy_id, "parameters": parameters})
+        request_data = {"strategy_id": strategy_id, "parameters": parameters}
+        if auxiliary_filename is not None:
+            request_data["auxiliary_filename"] = auxiliary_filename
+        request_hash = digest(request_data)
         if key is not None:
             existing = self.db.runs.find_one({"session_id": session_id, "idempotency_key": key})
             if existing:
@@ -228,6 +231,7 @@ class MongoStore:
             "session_id": session_id,
             "strategy_id": strategy_id,
             "parameters": parameters,
+            "auxiliary_filename": auxiliary_filename,
             "status": "queued",
             "summary": None,
             "error": None,

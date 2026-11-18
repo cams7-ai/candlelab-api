@@ -67,6 +67,7 @@ class SessionRequest(Input):
 
 
 class RunRequest(Input):
+    auxiliary_filename: str | None = Field(default=None, min_length=1, max_length=255)
     strategy_id: str = Field(min_length=1, max_length=100)
     parameters: dict[str, Any] = Field(default_factory=dict)
 
@@ -145,6 +146,7 @@ class Summary(BaseModel):
 
 
 class Run(BaseModel):
+    auxiliary_filename: str | None = None
     id: str
     session_id: str
     strategy_id: str

@@ -62,5 +62,10 @@ class Service:
             "slippage": "0",
         }
         return self.store.create_run(
-            session_id, request.strategy_id, parameters.model_dump(), key, policy
+            session_id,
+            request.strategy_id,
+            parameters.model_dump(),
+            key,
+            policy,
+            auxiliary_filename=request.auxiliary_filename,
         )

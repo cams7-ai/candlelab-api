@@ -246,14 +246,29 @@ def test_auxiliary_http_validation_and_worker_snapshot(client, store, rows):
         },
     )
     assert bad.status_code == 422
-    response = client.post(
-        path, json={"strategy_id": "MACHINE_LEARNING@1", "parameters": {"auxiliary_json": raw}}
-    )
+    payload = {
+        "strategy_id": "MACHINE_LEARNING@1",
+        "parameters": {"auxiliary_json": raw},
+        "auxiliary_filename": "previsões-btc.json",
+    }
+    headers = {"Idempotency-Key": "auxiliary-file"}
+    response = client.post(path, json=payload, headers=headers)
     assert response.status_code == 202, response.text
     assert response.json()["parameters"]["auxiliary_json"] == raw
+    assert response.json()["auxiliary_filename"] == "previsões-btc.json"
+    assert client.post(path, json=payload, headers=headers).json()["id"] == response.json()["id"]
+    assert (
+        client.post(
+            path, json={**payload, "auxiliary_filename": "outro.json"}, headers=headers
+        ).status_code
+        == 409
+    )
+    assert client.get(path).json()["items"][0]["auxiliary_filename"] == "previsões-btc.json"
     assert response.json()["policy"]["engine_version"] == "CANDLELAB_ENGINE@2"
     Worker(store).once()
-    assert client.get(f"/api/v1/runs/{response.json()['id']}").json()["status"] == "completed"
+    final = client.get(f"/api/v1/runs/{response.json()['id']}").json()
+    assert final["status"] == "completed"
+    assert final["auxiliary_filename"] == "previsões-btc.json"
     assert client.get("/openapi.json").json()["info"]["version"] == "0.2.0"
 
 
