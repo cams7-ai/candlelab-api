@@ -94,11 +94,13 @@ def test_errors_and_catalog_openapi(client, rows):
         == 503
     )
     catalog = client.get("/api/v1/strategies").json()["items"]
-    assert len(catalog) == 22
+    assert len(catalog) == 34
     assert catalog[0]["parameters_schema"]["properties"]["short_window"]["type"] == "integer"
     assert "5m" in client.get("/api/v1/instruments").json()["items"][0]["intervals"]
     schema = client.get("/openapi.json").json()
-    assert len(schema["paths"]) == 12
+    assert len(schema["paths"]) == 14
+    assert "/api/v1/strategy-combinations" in schema["paths"]
+    assert "/api/v1/strategy-combinations/{combination_id}" in schema["paths"]
     assert "202" in schema["paths"]["/api/v1/sessions/{session_id}/runs"]["post"]["responses"]
     assert schema["components"]["schemas"]["BinanceRequest"]["required"] == ["symbol", "interval"]
     assert (
@@ -285,7 +287,7 @@ def test_delete_cors_preflight(client):
     assert "DELETE" in response.headers["access-control-allow-methods"]
 
 
-def test_delete_session_cascades_all_run_states(client, store, rows):
+def test_delete_session_blocks_all_run_states(client, store, rows):
     dataset, sess = prepare(client, rows)
     other_session = session(client, dataset["id"]).json()
     body = {"strategy_id": "SMA_CROSS@1", "parameters": {"short_window": 2, "long_window": 3}}
@@ -294,43 +296,49 @@ def test_delete_session_cascades_all_run_states(client, store, rows):
     assert Worker(store).once()
     running = client.post(path + "/runs", json=body).json()
     old_job = store.claim()
-    assert old_job["id"] == running["id"]
     queued = client.post(path + "/runs", json=body).json()
     failed = client.post(path + "/runs", json=body).json()
     store.db.runs.update_one({"id": failed["id"]}, {"$set": {"status": "failed"}})
-    other = client.post(f"/api/v1/sessions/{other_session['id']}/runs", json=body).json()
+    response = client.delete(path)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "SESSION_IN_USE"
+    assert {run["id"] for run in response.json()["error"]["details"][0]["runs"]} == {
+        run["id"] for run in (completed, running, queued, failed)
+    }
+    assert client.get(path).status_code == 200
+    assert store.db.series.count_documents({"run_id": completed["id"]}) > 0
+    for run in (completed, running, queued, failed):
+        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 200
+    store.renew(old_job)
+    for run in (completed, running, queued, failed):
+        store.db.runs.update_one({"id": run["id"]}, {"$set": {"status": "failed"}})
+        assert client.delete(f"/api/v1/runs/{run['id']}").status_code == 204
     assert client.delete(path).status_code == 204
     assert client.get(path).status_code == 404
-    assert client.get(path + "/runs").status_code == 404
-    assert client.post(path + "/runs", json=body).status_code == 404
     assert client.delete(path).status_code == 404
-    for run in (completed, running, queued, failed):
-        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 404
-        assert store.db.series.count_documents({"run_id": run["id"]}) == 0
-    assert store.db.runs.count_documents({"session_id": sess["id"]}) == 0
-    with pytest.raises(AppError, match="Posse"):
-        store.renew(old_job)
-    assert store.fail(old_job, {}) == 0
-    assert client.get(f"/api/v1/runs/{other['id']}").status_code == 200
     assert client.get(f"/api/v1/sessions/{other_session['id']}").status_code == 200
     assert client.get(f"/api/v1/datasets/{dataset['id']}").status_code == 200
 
 
-def test_delete_session_fences_inflight_results(client, store, rows, monkeypatch):
+def test_delete_session_cannot_remove_inflight_results(client, store, rows, monkeypatch):
     _, sess = prepare(client, rows)
     run = client.post(
         f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
     ).json()
     original = store.db.series.insert_many
 
-    def insert_after_deletion(docs):
-        store.delete_session(sess["id"])
+    def insert_after_blocked_deletion(docs):
+        with pytest.raises(AppError) as exc:
+            store.delete_session(sess["id"])
+        assert exc.value.status == 409
+        assert exc.value.code == "SESSION_IN_USE"
         return original(docs)
 
-    monkeypatch.setattr(store.db.series, "insert_many", insert_after_deletion)
+    monkeypatch.setattr(store.db.series, "insert_many", insert_after_blocked_deletion)
     assert Worker(store).once()
-    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
-    assert store.db.runs.count_documents({"session_id": sess["id"]}) == 0
+    assert store.db.series.count_documents({"run_id": run["id"]}) > 0
+    assert store.run(run["id"])["status"] == "completed"
+    assert store.session(sess["id"])["id"] == sess["id"]
 
 
 def test_delete_session_racing_run_creation(client, store, rows, monkeypatch):
@@ -354,28 +362,22 @@ def test_delete_session_racing_run_creation(client, store, rows, monkeypatch):
 def test_delete_session_retries_partial_cleanup(client, store, rows, monkeypatch):
     from pymongo.errors import AutoReconnect
 
-    _, sess = prepare(client, rows)
-    run = client.post(
-        f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
-    ).json()
-    assert Worker(store).once()
+    dataset, sess = prepare(client, rows)
 
-    def unavailable(query):
+    def unavailable(*args, **kwargs):
         raise AutoReconnect()
 
     with monkeypatch.context() as patch:
-        patch.setattr(store.db.series, "delete_many", unavailable)
+        patch.setattr(store.db.sessions, "delete_one", unavailable)
         with pytest.raises(AutoReconnect):
             store.delete_session(sess["id"])
     assert store.db.sessions.find_one({"id": sess["id"]})["deleting"] is True
-    assert store.db.runs.find_one({"id": run["id"]})["status"] == "deleting"
-    assert store.claim() is None
     store.delete_session(sess["id"])
     assert store.db.sessions.find_one({"id": sess["id"]}) is None
-    assert store.db.series.count_documents({"run_id": run["id"]}) == 0
+    assert store.dataset(dataset["id"])["status"] == "published"
 
 
-def test_delete_dataset_cascades_sessions_and_runs(client, store, rows):
+def test_delete_dataset_blocks_linked_sessions_and_preserves_runs(client, store, rows):
     dataset, sess = prepare(client, rows)
     second_session = session(client, dataset["id"]).json()
     other_dataset = upload(client, rows, symbol="ETHUSDT").json()
@@ -386,34 +388,37 @@ def test_delete_dataset_cascades_sessions_and_runs(client, store, rows):
     running = client.post(f"/api/v1/sessions/{second_session['id']}/runs", json=body).json()
     job = store.claim()
     queued = client.post(f"/api/v1/sessions/{sess['id']}/runs", json=body).json()
-    other = client.post(f"/api/v1/sessions/{other_session['id']}/runs", json=body).json()
-    assert client.get(f"/api/v1/datasets/{dataset['id']}/candles").status_code == 200
     endpoint = f"/api/v1/datasets/{dataset['id']}"
+    response = client.delete(endpoint)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "DATASET_IN_USE"
+    assert {item["id"] for item in response.json()["error"]["details"][0]["sessions"]} == {
+        sess["id"],
+        second_session["id"],
+    }
+    assert client.get(endpoint).status_code == 200
+    assert client.get(endpoint + "/candles").json()["items"]
+    for linked_session in (sess, second_session):
+        assert client.get(f"/api/v1/sessions/{linked_session['id']}").status_code == 200
+    for run in (completed, running, queued):
+        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 200
+    store.renew(job)
+    assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) > 0
+    assert store.db.acquisitions.count_documents({"dataset_id": dataset["id"]}) > 0
+    for linked_session in (sess, second_session):
+        for run in store.db.runs.find({"session_id": linked_session["id"]}):
+            store.db.runs.update_one({"id": run["id"]}, {"$set": {"status": "failed"}})
+            assert client.delete(f"/api/v1/runs/{run['id']}").status_code == 204
+        assert client.delete(f"/api/v1/sessions/{linked_session['id']}").status_code == 204
     assert client.delete(endpoint).status_code == 204
     assert client.get(endpoint).status_code == 404
     assert client.get(endpoint + "/candles").status_code == 404
     assert client.delete(endpoint).status_code == 404
-    assert client.get("/api/v1/datasets").json()["items"] == [other_dataset]
-    for deleted_session in (sess, second_session):
-        path = f"/api/v1/sessions/{deleted_session['id']}"
-        assert client.get(path).status_code == 404
-        assert client.get(path + "/runs").status_code == 404
-        assert client.post(path + "/runs", json=body).status_code == 404
-    for run in (completed, running, queued):
-        assert client.get(f"/api/v1/runs/{run['id']}").status_code == 404
-        assert store.db.series.count_documents({"run_id": run["id"]}) == 0
-    with pytest.raises(AppError, match="Posse"):
-        store.renew(job)
+    assert client.get(f"/api/v1/sessions/{other_session['id']}").status_code == 200
+    assert client.get(f"/api/v1/datasets/{other_dataset['id']}/candles").json()["items"]
     assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) == 0
     assert store.db.acquisitions.count_documents({"dataset_id": dataset["id"]}) == 0
-    assert client.get(f"/api/v1/runs/{other['id']}").status_code == 200
-    assert client.get(f"/api/v1/datasets/{other_dataset['id']}/candles").json()["items"]
-    assert session(client, dataset["id"]).status_code == 404
-    reimported = upload(client, rows)
-    assert reimported.status_code == 200
-    assert reimported.json()["id"] == dataset["id"]
-    assert client.get(endpoint + "/candles").json()["items"]
-    assert store.db.sessions.count_documents({"dataset_id": dataset["id"]}) == 0
+    assert upload(client, rows).json()["id"] == dataset["id"]
 
 
 def test_delete_dataset_racing_session_creation(client, store, rows, monkeypatch):
@@ -437,6 +442,8 @@ def test_delete_dataset_retries_partial_cleanup(client, store, rows, monkeypatch
         f"/api/v1/sessions/{sess['id']}/runs", json={"strategy_id": "SMA_CROSS@1"}
     ).json()
     assert Worker(store).once()
+    assert client.delete(f"/api/v1/runs/{run['id']}").status_code == 204
+    assert client.delete(f"/api/v1/sessions/{sess['id']}").status_code == 204
 
     def unavailable(query):
         raise AutoReconnect()
@@ -454,3 +461,93 @@ def test_delete_dataset_retries_partial_cleanup(client, store, rows, monkeypatch
     assert store.db.series.count_documents({"run_id": run["id"]}) == 0
     assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) == 0
     assert store.db.acquisitions.count_documents({"dataset_id": dataset["id"]}) == 0
+
+
+def test_delete_dataset_rechecks_sessions_created_during_validation(
+    client, store, rows, monkeypatch
+):
+    dataset = upload(client, rows).json()
+    original = store.db.datasets.find_one_and_update
+
+    def mark_with_concurrent_session(*args, **kwargs):
+        result = original(*args, **kwargs)
+        store.db.sessions.insert_one(
+            {
+                "id": "racing-session",
+                "name": "Criada durante a exclusão",
+                "dataset_id": dataset["id"],
+            }
+        )
+        return result
+
+    monkeypatch.setattr(store.db.datasets, "find_one_and_update", mark_with_concurrent_session)
+    response = client.delete(f"/api/v1/datasets/{dataset['id']}")
+    assert response.status_code == 409, response.text
+    assert store.dataset(dataset["id"])["status"] == "published"
+    assert store.db.sessions.find_one({"id": "racing-session"}) is not None
+    assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) > 0
+
+
+@pytest.mark.parametrize("failure_on", [1, 2])
+def test_delete_dataset_keeps_data_when_session_lookup_fails(
+    client, store, rows, monkeypatch, failure_on
+):
+    from pymongo.errors import AutoReconnect
+
+    dataset = upload(client, rows).json()
+    original = store.db.sessions.find
+    calls = 0
+
+    def unavailable(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == failure_on:
+            raise AutoReconnect()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.db.sessions, "find", unavailable)
+    response = client.delete(f"/api/v1/datasets/{dataset['id']}")
+    assert response.status_code == 503, response.text
+    assert store.dataset(dataset["id"])["status"] == "published"
+    assert store.db.candles.count_documents({"dataset_id": dataset["id"]}) > 0
+
+
+def test_delete_session_rechecks_concurrent_run_and_restores_session(
+    client, store, rows, monkeypatch
+):
+    _, sess = prepare(client, rows)
+    original = store.db.sessions.find_one_and_update
+
+    def mark_with_run(*args, **kwargs):
+        result = original(*args, **kwargs)
+        store.db.runs.insert_one({"id": "racing-run", "session_id": sess["id"], "status": "queued"})
+        return result
+
+    monkeypatch.setattr(store.db.sessions, "find_one_and_update", mark_with_run)
+    response = client.delete(f"/api/v1/sessions/{sess['id']}")
+    assert response.status_code == 409, response.text
+    assert store.session(sess["id"]) == sess
+    assert store.db.runs.find_one({"id": "racing-run"}) is not None
+
+
+@pytest.mark.parametrize("failure_on", [1, 2])
+def test_delete_session_preserves_session_on_lookup_failure(
+    client, store, rows, monkeypatch, failure_on
+):
+    from pymongo.errors import AutoReconnect
+
+    _, sess = prepare(client, rows)
+    original = store.db.runs.find
+    calls = 0
+
+    def unavailable(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == failure_on:
+            raise AutoReconnect()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.db.runs, "find", unavailable)
+    response = client.delete(f"/api/v1/sessions/{sess['id']}")
+    assert response.status_code == 503, response.text
+    assert store.session(sess["id"]) == sess

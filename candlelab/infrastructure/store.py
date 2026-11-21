@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 
 from candlelab.domain.candles import MAX_TIME_MS, Candle, content_hash
 from candlelab.domain.errors import AppError, invalid
+from candlelab.domain.configuration_usage import configuration_usage
 from candlelab.domain.dataset_names import dataset_name
 
 
@@ -47,6 +48,8 @@ class MongoStore:
         self.db.candles.create_index([("dataset_id", 1), ("open_time_ms", 1)], unique=True)
         self.db.acquisitions.create_index([("dataset_id", 1), ("acquired_at", 1)])
         self.db.sessions.create_index("id", unique=True)
+        self.db.strategy_combinations.create_index("id", unique=True)
+        self.db.strategy_combinations.create_index("name_key", unique=True)
         self.db.runs.create_index("id", unique=True)
         self.db.runs.create_index([("session_id", 1), ("id", 1)])
         self.db.runs.create_index(
@@ -146,18 +149,42 @@ class MongoStore:
             raise AppError("NOT_FOUND", "Dataset não encontrado.", status=404)
         return clean(doc)
 
+    def _assert_dataset_unused(self, dataset_id):
+        sessions = list(
+            self.db.sessions.find({"dataset_id": dataset_id}, {"_id": 0, "id": 1, "name": 1})
+        )
+        if sessions:
+            raise AppError(
+                "DATASET_IN_USE",
+                "Este conjunto de candles não pode ser excluído: existem sessões vinculadas.",
+                details=[
+                    {
+                        "field": "dataset_id",
+                        "reason": "Remova as sessões vinculadas antes de excluir os candles.",
+                        "sessions": sessions,
+                    }
+                ],
+                status=409,
+            )
+
     def delete_dataset(self, dataset_id):
+        if not self.db.datasets.find_one({"id": dataset_id}):
+            raise AppError("NOT_FOUND", "Dataset não encontrado.", status=404)
+        self._assert_dataset_unused(dataset_id)
         dataset = self.db.datasets.find_one_and_update(
             {"id": dataset_id}, {"$set": {"status": "deleting"}}
         )
         if not dataset:
             raise AppError("NOT_FOUND", "Dataset não encontrado.", status=404)
-        for session in self.db.sessions.find({"dataset_id": dataset_id}, {"id": 1}):
-            try:
-                self.delete_session(session["id"])
-            except AppError as exc:
-                if exc.code != "NOT_FOUND":
-                    raise
+        try:
+            # Fence new sessions, then recheck sessions that raced with the first check.
+            self._assert_dataset_unused(dataset_id)
+        except Exception:
+            self.db.datasets.update_one(
+                {"id": dataset_id, "status": "deleting"},
+                {"$set": {"status": dataset["status"]}},
+            )
+            raise
         self.db.candles.delete_many({"dataset_id": dataset_id})
         self.db.acquisitions.delete_many({"dataset_id": dataset_id})
         self.db.datasets.delete_one({"id": dataset_id, "status": "deleting"})
@@ -166,25 +193,109 @@ class MongoStore:
         for doc in self.db.candles.find({"dataset_id": dataset_id}).sort("open_time_ms", ASCENDING):
             yield Candle.from_document(doc)
 
+    def combination(self, combination_id):
+        doc = self.db.strategy_combinations.find_one({"id": combination_id})
+        if not doc:
+            raise AppError("NOT_FOUND", "Combinação não encontrada.", status=404)
+        return {k: v for k, v in doc.items() if k not in ("_id", "name_key")}
+
+    def combinations(self):
+        return [
+            {k: v for k, v in doc.items() if k not in ("_id", "name_key")}
+            for doc in self.db.strategy_combinations.find().sort("name_key", ASCENDING)
+        ]
+
+    def save_combination(self, data, combination_id=None):
+        if combination_id is not None:
+            self.combination(combination_id)
+        doc = {**data, "id": combination_id or uuid4().hex, "name_key": data["name"].casefold()}
+        try:
+            if combination_id is None:
+                self.db.strategy_combinations.insert_one(doc.copy())
+            elif not self.db.strategy_combinations.replace_one(
+                {"id": combination_id}, doc.copy()
+            ).matched_count:
+                raise AppError("NOT_FOUND", "Combinação não encontrada.", status=404)
+        except DuplicateKeyError:
+            raise AppError(
+                "DUPLICATE_NAME", "Já existe uma combinação com esse nome.", status=409
+            ) from None
+        return {k: v for k, v in doc.items() if k != "name_key"}
+
+    def delete_combination(self, combination_id):
+        target = self.combination(combination_id)
+        if target["kind"] == "strategy":
+            usage = configuration_usage(
+                target,
+                self.db.strategy_combinations.find(
+                    {"kind": "custom"}, {"id": 1, "name": 1, "members": 1}
+                ),
+                self.db.runs.find(
+                    {"combination_snapshot": {"$ne": None}},
+                    {"id": 1, "combination_snapshot": 1},
+                ),
+            )
+            if any(usage.values()):
+                raise AppError(
+                    "CONFIGURATION_IN_USE",
+                    "Esta configuração não pode ser excluída: existem vínculos ou cópias "
+                    "cuja origem não pode ser descartada.",
+                    details=[
+                        {
+                            "field": "combination_id",
+                            "reason": "Remova os vínculos antes de excluir a configuração. "
+                            "Cópias sem identificador de origem exigem revisão.",
+                            **usage,
+                        }
+                    ],
+                    status=409,
+                )
+        if not self.db.strategy_combinations.delete_one({"id": combination_id}).deleted_count:
+            raise AppError("NOT_FOUND", "Combinação não encontrada.", status=404)
+
     def session(self, session_id):
         doc = self.db.sessions.find_one({"id": session_id, "deleting": {"$ne": True}})
         if not doc:
             raise AppError("NOT_FOUND", "Sessão não encontrada.", status=404)
         return clean(doc)
 
+    def _assert_session_unused(self, session_id):
+        runs = list(self.db.runs.find({"session_id": session_id}, {"_id": 0, "id": 1, "status": 1}))
+        if runs:
+            raise AppError(
+                "SESSION_IN_USE",
+                "Esta sessão não pode ser excluída: existem processamentos vinculados.",
+                details=[
+                    {
+                        "field": "session_id",
+                        "reason": "Remova os processamentos antes de excluir a sessão.",
+                        "runs": runs,
+                    }
+                ],
+                status=409,
+            )
+
     def delete_session(self, session_id):
+        if not self.db.sessions.find_one({"id": session_id}):
+            raise AppError("NOT_FOUND", "Sessão não encontrada.", status=404)
+        self._assert_session_unused(session_id)
         session = self.db.sessions.find_one_and_update(
             {"id": session_id}, {"$set": {"deleting": True}}
         )
         if not session:
             raise AppError("NOT_FOUND", "Sessão não encontrada.", status=404)
-        # Fence workers before removing results. Keep the session until cleanup
-        # finishes so a failed deletion can be retried.
-        self.db.runs.update_many({"session_id": session_id}, {"$set": {"status": "deleting"}})
-        for run in self.db.runs.find({"session_id": session_id}, {"id": 1}):
-            self.db.series.delete_many({"run_id": run["id"]})
-        self.db.runs.delete_many({"session_id": session_id})
-        self.db.sessions.delete_one({"id": session_id})
+        try:
+            # Fence new runs, then catch insertions that raced with the first check.
+            self._assert_session_unused(session_id)
+        except Exception:
+            restore = (
+                {"$set": {"deleting": session["deleting"]}}
+                if "deleting" in session
+                else {"$unset": {"deleting": ""}}
+            )
+            self.db.sessions.update_one({"id": session_id, "deleting": True}, restore)
+            raise
+        self.db.sessions.delete_one({"id": session_id, "deleting": True})
 
     def create_session(self, data):
         self.dataset(data["dataset_id"])
@@ -215,12 +326,23 @@ class MongoStore:
         self.db.series.delete_many({"run_id": run_id})
         self.db.runs.delete_one({"id": run_id, "status": {"$in": ["completed", "failed"]}})
 
-    def create_run(self, session_id, strategy_id, parameters, key, policy, auxiliary_filename=None):
+    def create_run(
+        self,
+        session_id,
+        strategy_id,
+        parameters,
+        key,
+        policy,
+        auxiliary_filename=None,
+        combination_snapshot=None,
+    ):
         session = self.session(session_id)
         dataset = self.dataset(session["dataset_id"])
         request_data = {"strategy_id": strategy_id, "parameters": parameters}
         if auxiliary_filename is not None:
             request_data["auxiliary_filename"] = auxiliary_filename
+        if combination_snapshot is not None:
+            request_data["combination_snapshot"] = combination_snapshot
         request_hash = digest(request_data)
         if key is not None:
             existing = self.db.runs.find_one({"session_id": session_id, "idempotency_key": key})
@@ -232,6 +354,7 @@ class MongoStore:
             "strategy_id": strategy_id,
             "parameters": parameters,
             "auxiliary_filename": auxiliary_filename,
+            "combination_snapshot": combination_snapshot,
             "status": "queued",
             "summary": None,
             "error": None,

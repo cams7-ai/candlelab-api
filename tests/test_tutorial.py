@@ -87,10 +87,10 @@ def resolve_spec(kind):
 
 def test_catalog_matches_all_tutorial_sections():
     items = catalog()
-    assert len(items) == 22
-    assert sum(i["category"] == "individual" for i in items) == 12
+    assert len(items) == 34
+    assert sum(i["category"] == "individual" for i in items) == 24
     assert sum(i["category"] == "combination" for i in items) == 6
-    assert len({i["id"] for i in items}) == 22
+    assert len({i["id"] for i in items}) == 34
 
 
 def test_bollinger_population_variance_wilder_and_macd():
@@ -269,7 +269,7 @@ def test_auxiliary_http_validation_and_worker_snapshot(client, store, rows):
     final = client.get(f"/api/v1/runs/{response.json()['id']}").json()
     assert final["status"] == "completed"
     assert final["auxiliary_filename"] == "previsões-btc.json"
-    assert client.get("/openapi.json").json()["info"]["version"] == "0.2.0"
+    assert client.get("/openapi.json").json()["info"]["version"] == "0.3.0"
 
 
 def test_hourly_candles_supported():

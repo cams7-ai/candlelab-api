@@ -5,6 +5,7 @@ from typing import Protocol
 
 from pydantic import Field, model_validator, field_validator
 
+from candlelab.domain.components import allows_rsi
 from candlelab.domain.errors import invalid
 from candlelab.domain.indicators import MovingAverage, RSI
 from candlelab.domain.strategy_types import Parameters, Window, Evaluation, StrategySpec
@@ -101,9 +102,7 @@ class CrossStrategy:
                 reason = "WARMUP"
             elif previous <= 0 < comparison:
                 side, reason = "BUY", "CROSS_UP"
-                if self.rsi and (
-                    rsi is None or rsi < Decimal(self.parameters.rsi_confirmation_min)
-                ):
+                if self.rsi and not allows_rsi(rsi, self.parameters.rsi_confirmation_min):
                     side, reason = None, "RSI_FILTER_BLOCKED"
             elif previous >= 0 > comparison:
                 side, reason = "SELL", "CROSS_DOWN"
@@ -136,7 +135,13 @@ REGISTRY = {
     ),
     "RSI_REVERSION@1": StrategySpec("Reversão RSI", RSIParameters, RSIStrategy),
     "SMA_RSI_FILTER@1": StrategySpec(
-        "SMA com confirmação RSI", FilterParameters, lambda p: CrossStrategy(p, filtered=True)
+        "SMA com confirmação RSI",
+        FilterParameters,
+        lambda p: CrossStrategy(p, filtered=True),
+        components=[
+            {"strategy_id": "SMA_CROSS@1", "role": "signal"},
+            {"strategy_id": "RSI_CONFIRMATION@1", "role": "filter"},
+        ],
     ),
 }
 
@@ -165,6 +170,8 @@ def resolve(strategy_id, parameters):
 
 
 def catalog():
+    from candlelab.domain.combinations import CUSTOM_ID, combinable
+
     return [
         {
             "id": key,
@@ -175,11 +182,19 @@ def catalog():
             "rules": spec.rules,
             "limitations": spec.limitations,
             "required_data": spec.required_data,
+            "combinable": combinable(key, spec),
+            "composition_role": spec.composition_role,
+            "components": spec.components,
         }
         for key, spec in REGISTRY.items()
+        if key != CUSTOM_ID
     ]
 
 
 from candlelab.domain.tutorial import register  # noqa: E402
 
 register(REGISTRY)
+
+from candlelab.domain.combinations import CUSTOM_ID, CUSTOM_SPEC  # noqa: E402
+
+REGISTRY[CUSTOM_ID] = CUSTOM_SPEC

@@ -18,6 +18,7 @@ class Evaluation:
     side: str | None
     reason: str
     order: dict | None = None
+    buy_allowed: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -29,3 +30,5 @@ class StrategySpec:
     rules: str = ""
     limitations: str = ""
     required_data: list[str] = field(default_factory=list)
+    composition_role: str = "signal"
+    components: list[dict] = field(default_factory=list)

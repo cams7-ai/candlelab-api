@@ -68,8 +68,17 @@ class SessionRequest(Input):
 
 class RunRequest(Input):
     auxiliary_filename: str | None = Field(default=None, min_length=1, max_length=255)
-    strategy_id: str = Field(min_length=1, max_length=100)
+    strategy_id: str | None = Field(default=None, min_length=1, max_length=100)
+    combination_id: str | None = Field(default=None, min_length=1, max_length=100)
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def selection(self):
+        if bool(self.strategy_id) == bool(self.combination_id):
+            raise ValueError("Selecione estratégia ou combinação, exclusivamente.")
+        if self.combination_id and (self.parameters or self.auxiliary_filename):
+            raise ValueError("Combinação salva usa seus próprios parâmetros e dados auxiliares.")
+        return self
 
 
 class ErrorValue(BaseModel):
@@ -146,6 +155,7 @@ class Summary(BaseModel):
 
 
 class Run(BaseModel):
+    combination_snapshot: dict[str, Any] | None = None
     auxiliary_filename: str | None = None
     id: str
     session_id: str
@@ -202,6 +212,9 @@ class InstrumentResponse(BaseModel):
 
 
 class StrategyResponse(BaseModel):
+    composition_role: Literal["signal", "filter", "exit"] = "signal"
+    components: list[dict[str, Any]] = []
+    combinable: bool = False
     category: Literal["legacy", "individual", "combination"] = "legacy"
     rules: str = ""
     limitations: str = ""

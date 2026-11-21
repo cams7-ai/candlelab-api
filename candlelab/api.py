@@ -14,6 +14,7 @@ from candlelab.config import Settings
 from candlelab.domain.candles import MAX_TIME_MS
 from candlelab.domain.errors import AppError, invalid
 from candlelab.domain.strategies import catalog
+from candlelab.domain.combinations import CombinationDefinition, CombinationResponse
 from candlelab.infrastructure.binance import BinanceClient
 from candlelab.infrastructure.cache import CandleCache
 from candlelab.infrastructure.store import MongoStore, digest
@@ -110,7 +111,7 @@ def create_app(settings=None, store=None, binance=None, cache=None):
 
     app = FastAPI(
         title="CandleLab API",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
         responses={status: {"model": ErrorResponse} for status in (404, 409, 422, 502, 503)},
     )
@@ -120,7 +121,7 @@ def create_app(settings=None, store=None, binance=None, cache=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Content-Type", "Idempotency-Key"],
     )
 
@@ -191,6 +192,25 @@ def create_app(settings=None, store=None, binance=None, cache=None):
     @app.get(prefix + "/strategies", response_model=StrategiesResponse)
     def strategies():
         return {"items": catalog()}
+
+    @app.get(prefix + "/strategy-combinations", response_model=Page[CombinationResponse])
+    def combinations():
+        return {"items": store.combinations(), "next_cursor": None}
+
+    @app.post(
+        prefix + "/strategy-combinations", response_model=CombinationResponse, status_code=201
+    )
+    def create_combination(request: CombinationDefinition):
+        return store.save_combination(request.model_dump())
+
+    @app.put(prefix + "/strategy-combinations/{combination_id}", response_model=CombinationResponse)
+    def update_combination(combination_id: str, request: CombinationDefinition):
+        return store.save_combination(request.model_dump(), combination_id)
+
+    @app.delete(prefix + "/strategy-combinations/{combination_id}", status_code=204)
+    def delete_combination(combination_id: str):
+        store.delete_combination(combination_id)
+        return Response(status_code=204)
 
     @app.post(prefix + "/datasets", response_model=Dataset)
     async def upload(

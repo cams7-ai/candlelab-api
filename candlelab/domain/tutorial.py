@@ -3,6 +3,7 @@
 from collections import deque
 from decimal import Decimal as D, localcontext
 
+from candlelab.domain.components import RECIPES, RULES, RuleContext, evaluate_rules, atr_exit
 from candlelab.domain.errors import invalid
 from candlelab.domain.indicators import Bands, MACD, Volatility
 from candlelab.domain.numbers import INDICATOR_CONTEXT
@@ -204,6 +205,96 @@ DEFINITIONS = [
 ]
 
 
+COMPONENT_FIELDS = {
+    "RSI_CONFIRMATION": (
+        "Confirmação RSI",
+        {
+            "rsi_period": (Window, 14),
+            "rsi_confirmation_min": number("50", "Confirmação mínima RSI", "0", "100"),
+        },
+        "filter",
+    ),
+    "GRID_REGIME": (
+        "Regime de grade ADX",
+        {"atr_period": (Window, 14), "adx_limit": number("20", "ADX máximo", "0", "100")},
+        "filter",
+    ),
+    "RANKING_CONFIRMATION": (
+        "Seleção por ranking",
+        {
+            "top_n": (Window, 3),
+            "min_liquidity": number("1000000", "Liquidez mínima USDT", "0", "1000000000000"),
+            "min_roc": number("0", "ROC mínimo (%)", "-100", "1000000"),
+        },
+        "filter",
+    ),
+    "EMA_DIRECTION": ("Direção EMA", {**RISK, **TREND}, "signal"),
+    "ADX_CONFIRMATION": (
+        "Confirmação ADX",
+        {"atr_period": (Window, 14), "adx_limit": number("25", "ADX mínimo", "0", "100")},
+        "filter",
+    ),
+    "BOLLINGER_RECOVERY": ("Recuperação Bollinger", {**RISK, **BANDS}, "signal"),
+    "RSI_RECOVERY": (
+        "Recuperação RSI",
+        {"rsi_period": (Window, 14), "recovery": number("30", "Recuperação RSI", "1", "99")},
+        "filter",
+    ),
+    "VOLUME_CONFIRMATION": (
+        "Confirmação de volume",
+        {
+            "volume_period": (Window, 20),
+            "volume_multiple": number("1", "Volume relativo mínimo", "0.1", "100"),
+        },
+        "filter",
+    ),
+    "MACD_SIGNAL": ("Sinal MACD", RISK, "signal"),
+    "EMA_CONFIRMATION": ("Preço acima da EMA", {"ema_period": (Window, 21)}, "filter"),
+    "RSI_RANGE": (
+        "Faixa RSI",
+        {
+            "rsi_period": (Window, 14),
+            "rsi_min": number("40", "RSI mínimo", "0", "100"),
+            "rsi_max": number("70", "RSI máximo", "0", "100"),
+        },
+        "filter",
+    ),
+    "ATR_EXIT": (
+        "Saída trailing ATR",
+        {
+            **RISK,
+            "atr_period": (Window, 14),
+            "atr_multiple": number("2", "Trailing ATR", "0.1", "20"),
+        },
+        "exit",
+    ),
+}
+FILTER_KINDS = {kind for kind, (_, _, role) in COMPONENT_FIELDS.items() if role == "filter"}
+COMPONENT_RULES = {
+    "RSI_CONFIRMATION": "Permite compras com RSI igual ou acima do limiar.",
+    "GRID_REGIME": "Permite compras com ADX abaixo do limite; na receita de grade desliga a grade ao atingir o limite.",
+    "RANKING_CONFIRMATION": "Permite compras quando BTC está no ranking líquido; requer universo externo.",
+    "EMA_DIRECTION": "EMA curta acima da longa, fechamento acima da curta e candle de alta; saída abaixo da longa.",
+    "ADX_CONFIRMATION": "Permite compras somente com ADX acima do limiar, após aquecimento ADX/ATR.",
+    "BOLLINGER_RECOVERY": "Retorno à banda inferior após fechamento abaixo dela; saída na média.",
+    "RSI_RECOVERY": "Permite compras no candle em que RSI cruza o limiar de recuperação.",
+    "VOLUME_CONFIRMATION": "Permite compras com volume maior que a média anterior multiplicada pelo limiar.",
+    "MACD_SIGNAL": "MACD12/26 cruza sinal9; saída abaixo do sinal ou na perda de força.",
+    "EMA_CONFIRMATION": "Permite compras com fechamento acima da EMA.",
+    "RSI_RANGE": "Permite compras com RSI dentro da faixa inclusiva.",
+    "ATR_EXIT": "Vende ao fechar no trailing ATR anterior ou no stop percentual; atualiza o trailing após verificar a saída.",
+}
+
+
+def recipe_components(kind):
+    # Internal order helpers are not independent trading signals.
+    return [
+        {"strategy_id": item + "@1", "role": COMPONENT_FIELDS.get(item, (None, None, "signal"))[2]}
+        for item in RECIPES.get(kind, ())
+        if item != "GRID_ORDERS"
+    ]
+
+
 class TutorialStrategy:
     def __init__(self, p, kind):
         self.p, self.kind = p, kind
@@ -301,74 +392,35 @@ class TutorialStrategy:
             and old["fast"] <= old["slow"]
             and fast > slow
         )
-        if kind in ("TREND_FOLLOWING", "EMA_ADX_ATR"):
+        frame = RuleContext({**locals(), "state": self})
+        if kind in RECIPES or kind in COMPONENT_FIELDS:
+            if kind in FILTER_KINDS:
+                frame.ready, frame.buy = True, True
+            if kind == "ATR_EXIT":
+                frame.ready = atr is not None
+            evaluate_rules(kind, frame)
+            values, ready, buy, sell, order, reason = (
+                frame.values,
+                frame.ready,
+                frame.buy,
+                frame.sell,
+                frame.order,
+                frame.reason,
+            )
+        elif kind == "TREND_FOLLOWING":
             values = {"ema_short": fast, "ema_long": slow}
             ready = old.get("slow") is not None
             buy = cross and c.close > max(fast, slow) if ready else False
             sell = slow is not None and c.close < slow
-            if kind == "EMA_ADX_ATR":
-                values.update(adx=adx, atr=atr)
-                ready = ready and adx is not None and atr is not None
-                buy = (
-                    ready
-                    and fast > slow
-                    and c.close > fast
-                    and c.close > c.open
-                    and adx > D(p.adx_limit)
-                )
-        elif kind in ("MOMENTUM", "MOMENTUM_RANKING"):
-            values = {"roc": roc, "ema": ema, "volume_mean": volume_mean}
-            ready = all(
-                x is not None for x in (roc, ema, old.get("roc"), old.get("ema"), volume_mean)
-            )
-            buy = (
-                ready
-                and roc > 0
-                and roc > old["roc"]
-                and ema > old["ema"]
-                and c.base_volume > volume_mean
-            )
-            sell = ready and (roc < old["roc"] or c.close < ema)
-            if kind == "MOMENTUM_RANKING":
-                universe = row["universe"]
-                ranked = sorted(
-                    (
-                        symbol
-                        for symbol, item in universe.items()
-                        if D(item["liquidity"]) >= D(p.min_liquidity)
-                    ),
-                    key=lambda symbol: (-D(universe[symbol]["roc"]), symbol),
-                )
-                rank = ranked.index("BTCUSDT") + 1 if "BTCUSDT" in ranked else len(universe) + 1
-                eligible = rank <= p.top_n and D(universe["BTCUSDT"]["roc"]) > D(p.min_roc)
-                values["rank"] = D(rank)
-                buy = buy and eligible
-                sell = sell or not eligible
-        elif kind in ("MEAN_REVERSION", "RSI_BOLLINGER"):
-            values = {"sma": mean, "bollinger_lower": lower, "bollinger_upper": upper}
-            ready = lower is not None and old.get("lower") is not None
-            recovery = ready and previous_c.close < old["lower"] and c.close >= lower
-            buy = recovery
-            sell = mean is not None and c.close >= mean
-            if kind == "MEAN_REVERSION":
-                values["adx"] = adx
-                ready = ready and adx is not None
-                buy = buy and ready and adx < D(p.adx_limit)
-            else:
-                values["rsi"] = rsi
-                ready = ready and rsi is not None and old.get("rsi") is not None
-                buy = buy and ready and old["rsi"] <= D(p.recovery) < rsi
-        elif kind in ("BREAKOUT", "BREAKOUT_VOLUME_ATR"):
-            values = {"resistance": resistance, "atr": atr}
-            ready = resistance is not None and atr is not None
-            buy = ready and c.close > resistance and atr / c.close * 100 >= D(p.min_atr_pct)
-            sell = self.level is not None and c.close < self.level
-            if buy and not self.position:
-                self.level = resistance
-            if kind == "BREAKOUT_VOLUME_ATR":
-                values["volume_mean"] = volume_mean
-                ready = ready and volume_mean is not None
-                buy = buy and ready and c.base_volume > volume_mean * D(p.volume_multiple)
+        elif kind in ("MOMENTUM", "BREAKOUT"):
+            RULES[kind](frame)
+            values, ready, buy, sell = frame.values, frame.ready, frame.buy, frame.sell
+        elif kind == "MEAN_REVERSION":
+            RULES["BOLLINGER_RECOVERY"](frame)
+            values, ready, buy, sell = frame.values, frame.ready, frame.buy, frame.sell
+            values["adx"] = adx
+            ready = ready and adx is not None
+            buy = buy and ready and adx < D(p.adx_limit)
         elif kind == "SWING_TRADING":
             values = {"support": support, "resistance": resistance, "sma": sma}
             ready = support is not None and sma is not None and previous_c is not None
@@ -410,50 +462,17 @@ class TutorialStrategy:
             order = {}
             # The engine computes initial_cash / 3 as an exact rational before flooring quantity.
             order["installments"] = 3
-        elif kind in ("GRID_TRADING", "GRID_ADX_ATR"):
-            ready = support is not None and resistance is not None and resistance > support
-            if kind == "GRID_ADX_ATR":
-                ready = ready and adx is not None and atr is not None
-            if ready and self.center is None:
-                self.center = (resistance + support) / 2
-                self.spacing = (
-                    (resistance - support) / p.levels
-                    if kind == "GRID_TRADING"
-                    else atr * D(p.atr_multiple)
-                )
-                self.grid_low, self.grid_high = support, resistance
-            if self.center is not None:
-                self.disabled |= c.close < self.grid_low or c.close > self.grid_high
-                if kind == "GRID_ADX_ATR" and adx is not None:
-                    self.disabled |= adx >= D(p.adx_limit)
-                values = {
-                    "grid_center": self.center,
-                    "grid_lower": self.grid_low,
-                    "grid_upper": self.grid_high,
-                }
-                if kind == "GRID_ADX_ATR":
-                    values.update(adx=adx, atr=atr)
-                if self.disabled:
-                    sell, reason = self.position, "GRID_DISABLED"
-                elif self.position:
-                    sell, order = True, {"limit_price": self.entry + self.spacing}
-                else:
-                    limit = self.center - self.spacing
-                    buy = limit >= self.grid_low and limit > 0
-                    order = {"limit_price": limit, "installments": p.levels}
-        elif kind == "MACD_EMA_RSI":
-            values = {"macd": macd, "macd_signal": signal, "ema": ema, "rsi": rsi}
-            ready = all(
-                x is not None for x in (macd, signal, old.get("macd"), old.get("signal"), ema, rsi)
+        elif kind == "GRID_TRADING":
+            RULES["GRID_TRADING"](frame)
+            RULES["GRID_ORDERS"](frame)
+            values, ready, buy, sell, order, reason = (
+                frame.values,
+                frame.ready,
+                frame.buy,
+                frame.sell,
+                frame.order,
+                frame.reason,
             )
-            buy = (
-                ready
-                and old["macd"] <= old["signal"]
-                and macd > signal
-                and c.close > ema
-                and D(p.rsi_min) <= rsi <= D(p.rsi_max)
-            )
-            sell = ready and (macd < signal or macd < old["macd"])
         elif kind == "ARBITRAGE":
             edge_a = D(row["bid_b"]) / D(row["ask"]) - 1
             edge_b = D(row["bid"]) / D(row["ask_b"]) - 1
@@ -477,16 +496,14 @@ class TutorialStrategy:
                 probability > D(p.buy_probability),
                 probability < D(p.sell_probability),
             )
-        if self.position and kind not in ("DCA", "ARBITRAGE"):
+        if self.position and hasattr(p, "stop_pct"):
             # Stop thresholds use only data available before this close.
             if c.close <= self.entry * (1 - D(p.stop_pct) / 100):
                 sell, order, reason = True, None, "STOP_CLOSE"
-            if kind in ("BREAKOUT", "BREAKOUT_VOLUME_ATR", "EMA_ADX_ATR") and atr is not None:
-                if self.trail is not None and c.close <= self.trail:
-                    sell, reason = True, "ATR_STOP_CLOSE"
-                candidate = c.close - D(p.atr_multiple) * atr
-                self.trail = max(self.trail, candidate) if self.trail is not None else candidate
-                values["atr_stop"] = self.trail
+            if kind in ("BREAKOUT", "ATR_EXIT") or "ATR_EXIT" in RECIPES.get(kind, ()):
+                frame.values, frame.sell, frame.reason = values, sell, reason
+                atr_exit(frame)
+                values, sell, reason = frame.values, frame.sell, frame.reason
         side = (
             "SELL"
             if self.position and sell
@@ -510,7 +527,10 @@ class TutorialStrategy:
             vwap=vwap,
         )
         self.history.append(c)
-        return Evaluation(values, ready, side, reason, order)
+        permission = bool(buy) if kind in FILTER_KINDS else None
+        if permission is not None:
+            side = None
+        return Evaluation(values, ready, side, reason, order, permission)
 
 
 def register(registry):
@@ -523,5 +543,17 @@ def register(registry):
             category="individual" if index < 12 else "combination",
             rules=rules,
             limitations=limitations,
+            required_data=REQUIREMENTS.get(kind, []),
+            components=recipe_components(kind),
+        )
+
+    for kind, (name, fields, role) in COMPONENT_FIELDS.items():
+        registry[kind + "@1"] = StrategySpec(
+            name,
+            parameter_model(kind, fields),
+            lambda p, k=kind: TutorialStrategy(p, k),
+            category="individual",
+            composition_role=role,
+            rules=COMPONENT_RULES[kind],
             required_data=REQUIREMENTS.get(kind, []),
         )

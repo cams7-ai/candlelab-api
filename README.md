@@ -1,4 +1,4 @@
-# CandleLab API 0.2.0
+# CandleLab API 0.3.0
 
 Backend local e monousuário para importar candles Binance Spot e executar backtests
 reproduzíveis com carteiras independentes. Python 3.11+, FastAPI/Pydantic, PyMongo e
@@ -378,3 +378,97 @@ a instalação inicial de dependências e imagens requer acesso aos registries.
 O [prompt desta versão](docs/prompt_261116_v0.2.0.md) foi criado antes das alterações e executado neste projeto. Consulte o [guia de estratégias e importação](docs/estrategias_v0.2.0.md) para as 18 novas opções, regras, padrões e hipóteses de execução. As quatro opções anteriores permanecem disponíveis. A entrada auxiliar é importada por processamento, com snapshot persistido e validação de cobertura temporal; não há dados externos fabricados automaticamente. Suporte adicional a candles de 1 hora.
 
 Veja os [resultados de validação 0.2.0](docs/validacao_v0.2.0.md).
+
+
+## Cadastro e execução de combinações — 0.3.0
+
+[Prompt executado](docs/prompt_261119_v0.3.0.md) · [Validação](docs/validacao_v0.3.0.md).
+
+Os cadastros ficam na coleção MongoDB `strategy_combinations`, com índices únicos para ID e nome normalizado por `casefold`. API e worker precisam ser reiniciados com o código 0.3.0; o frontend requer CORS com GET/POST/PUT/DELETE, já configurado. Os 22 itens anteriores do catálogo continuam disponíveis.
+
+- GET `/api/v1/strategy-combinations`: `{ "items": [...], "next_cursor": null }`.
+- POST `/api/v1/strategy-combinations`: cria e retorna cadastro (201).
+- PUT `/api/v1/strategy-combinations/{id}`: substitui definição validada e retorna cadastro (200).
+- DELETE `/api/v1/strategy-combinations/{id}`: exclui somente cadastro (204). Configurações personalizadas em uso retornam 409 `CONFIGURATION_IN_USE`.
+
+Nome: 1–200 caracteres após remover espaços externos; nomes repetidos ignorando caixa retornam 409. ID inexistente retorna 404; dados inválidos retornam 422 no contrato HTTP atual. Não há alteração retroativa de processamentos.
+
+Exemplo de composição livre:
+
+```json
+{
+  "name": "SMA e EMA",
+  "kind": "custom",
+  "members": [
+    {"strategy_id": "SMA_CROSS@1", "parameters": {"short_window": 5, "long_window": 21}},
+    {"strategy_id": "EMA_CROSS@1", "parameters": {"short_window": 8, "long_window": 21}}
+  ],
+  "buy_rule": "all",
+  "sell_rule": "any"
+}
+```
+
+São aceitos de 2 a 8 membros distintos cujo `combinable` no catálogo seja `true`. Parâmetros são validados/normalizados pelo mesmo registro das execuções diretas. A lista inclui as quatro estratégias legadas, Trend Following, Momentum, Mean Reversion, Breakout, Swing Trading e as combinações EMA/ADX/ATR, RSI/Bollinger, Breakout/Volume/ATR e MACD/EMA/RSI. DCA, grid e estratégias com dados auxiliares/múltiplas pernas não são elegíveis para composição genérica. Não se aceita referência a outro cadastro nem ao executor customizado dentro dos membros.
+
+Cada componente observa o mesmo fechamento e os fills reais da carteira compartilhada. Somente após todos estarem prontos, `all` exige sinal da direção em todos os componentes naquele candle e `any` exige em pelo menos um. Os votos não ficam armazenados de candles anteriores. Quando BUY e SELL satisfazem suas regras simultaneamente, SELL tem prioridade. Stops dos componentes seguem a regra SELL, inclusive quando ela é `all`; não há saída prioritária oculta. Ordens são executadas na próxima abertura, sem múltiplas carteiras ou ordens especiais. Indicadores usam prefixo `member_N__`, preservando os aquecimentos como `null`.
+
+Exemplo de configuração salva de uma combinação publicada:
+
+```json
+{"name": "EMA ADX ajustada", "kind": "preset", "strategy_id": "EMA_ADX_ATR@1", "parameters": {"short_window": 5, "long_window": 21}}
+```
+
+As seis combinações publicadas podem ser usadas como presets, mantendo as políticas originais. Momentum + Ranking continua exigindo `parameters.auxiliary_json` válido e dataset BTCUSDT; a cobertura temporal é revalidada ao iniciar o processamento. Dados auxiliares salvos são específicos de um dataset e não são preenchidos automaticamente.
+
+Para executar, envie a `POST /api/v1/sessions/{id}/runs`:
+
+```json
+{"combination_id": "ID_RETORNADO_PELO_CADASTRO"}
+```
+
+Esse campo é exclusivo em relação a `strategy_id`; com cadastro, não são aceitos parâmetros sobrescritos nem `auxiliary_filename`. Execuções diretas continuam aceitando os campos anteriores. O Service resolve o cadastro uma vez e persiste `combination_snapshot` completo, parâmetros efetivos e políticas. Composição livre usa o executor interno `CUSTOM_COMBINATION@1`, com JSON canônico em `parameters.definition_json`, motor `CANDLELAB_COMPOSITION@1` e política `SAME_CLOSE_VOTES_NEXT_OPEN@1`; ele não aparece como opção adicional no catálogo. O worker executa o snapshot, mesmo que o cadastro seja editado ou excluído antes do processamento. Presets continuam usando o ID original da estratégia.
+
+O snapshot entra no hash de idempotência: a mesma chave e configuração retornam a execução anterior; uma configuração alterada com a mesma chave retorna 409. Após excluir o cadastro, novas solicitações por seu ID retornam 404, inclusive tentativas de criação com chave anterior; a consulta da execução antiga continua disponível. Contabilidade Decimal, taxas e conciliação são preservadas.
+
+
+### Componentes reutilizáveis e agrupamento de combinações
+
+As seis receitas publicadas usam regras compartilhadas de sinal, filtro e saída em `candlelab/domain/components.py`. Os identificadores, parâmetros, aquecimento, valores e regras anteriores são preservados. A confirmação RSI legada também compartilha sua função com o novo componente individual. O catálogo mantém as 22 estratégias e acrescenta 12 componentes; `composition_role` descreve seu papel e `components` descreve as receitas.
+
+Uma combinação livre pode incorporar outra definição em `members[].combination`. O grupo é um snapshot completo, não uma referência ao cadastro de origem. Regras e agrupamentos são preservados; editar ou excluir a origem não altera o grupo nem execuções históricas. Membros antigos com `strategy_id` e `parameters` continuam válidos. Membros de grupo deixam esses dois campos vazios; misturar as duas formas é rejeitado.
+
+Filtros autorizam compras independentemente de `all`/`any` e não geram votos de venda. Componentes de saída só participam das vendas. Ao menos um membro de sinal é obrigatório. Grupos seguem os mesmos requisitos de aquecimento e recebem os fills da carteira compartilhada. Há até 8 membros distintos por grupo, 4 níveis e 64 folhas executáveis no total (uma receita publicada conta como uma folha). Snapshots incorporados não criam ciclos de dependência.
+
+As restrições de composição Spot permanecem: grades, DCA, dados externos e carteiras especiais não podem ser incorporados a uma combinação livre. Essas estratégias continuam disponíveis no processamento e, quando aplicável, como configurações publicadas.
+
+A regressão compara 110 digests de execuções completas capturados antes da refatoração, além de 16 comparações financeiras entre receitas e composições explícitas dos componentes. Veja `tests/test_composition_regression.py` e `tests/test_nested_combinations.py`. Reinicie API, worker e frontend juntos após atualizar; não é necessária migração dos cadastros existentes.
+
+
+### Configurações personalizadas
+
+`POST/PUT /api/v1/strategy-combinations` também aceita `kind: strategy`, com `strategy_id` de uma estratégia individual/clássica e seus parâmetros. O tipo mantém membros vazios e regras `buy_rule: all` / `sell_rule: any`, como nas configurações `preset`. Receitas publicadas continuam usando `preset`; as combinações livres continuam usando `custom`. Valores são normalizados e validados pelo mesmo schema do catálogo, inclusive dados auxiliares.
+
+A criação de processamentos já aceita o ID do cadastro via `combination_id`, com snapshot persistido. Configurações compatíveis também podem ser incorporadas a combinações como snapshots, preservando o papel de sinal, filtro ou saída do componente. Não há migração de cadastros anteriores. Atualize API, worker e frontend juntos. Os testes de CRUD, execução, validação, dados externos, preservação de decimais e histórico estão em `tests/test_strategy_configurations.py`.
+
+
+### Restrição de exclusão de configurações personalizadas
+
+A exclusão de um cadastro `kind: strategy` verifica os processamentos de todas as sessões e as cópias incorporadas em combinações, inclusive grupos aninhados. Um processamento ligado diretamente ao cadastro é identificado pelo ID preservado em `combination_snapshot`, mesmo após editar o nome ou os parâmetros da origem. Todos os estados de processamento impedem a exclusão enquanto o registro existir.
+
+Quando há vínculo, DELETE `/api/v1/strategy-combinations/{id}` responde HTTP 409 com `error.code: CONFIGURATION_IN_USE`. A lista `error.details` identifica `runs`, `combinations` e `uncertain_copies`. O cadastro não é removido. Depois de remover os registros que impedem a exclusão, a mesma operação pode retornar 204. Um ID inexistente continua retornando 404.
+
+O contrato atual dos grupos armazena cópias sem ID de origem. Uma cópia de `kind: strategy` com a mesma estratégia base e o mesmo nome identifica o vínculo; com outro nome, não é possível descartar uma origem alterada. Nesse caso a API também retorna 409 e informa a cópia ambígua. Cadastros diferentes identificados diretamente nos snapshots de processamentos não são confundidos apenas por usarem a mesma estratégia base. A regra é aplicada na camada de armazenamento, independentemente do frontend. A exclusão de receitas e composições livres mantém o comportamento anterior e preserva os snapshots históricos.
+
+
+### Exclusão de conjuntos de candles
+
+DELETE `/api/v1/datasets/{id}` retorna HTTP 409 com `DATASET_IN_USE` se houver qualquer sessão vinculada ao conjunto. A resposta identifica as sessões em `error.details[].sessions`. A API preserva os candles, as sessões, os processamentos e os resultados; não há exclusão em cascata a partir dos candles. Depois de remover as sessões por suas ações próprias, um conjunto sem vínculos pode ser excluído com resposta 204. IDs inexistentes retornam 404.
+
+A verificação acontece antes e depois de marcar o conjunto para exclusão, em conjunto com a validação da criação de sessões. Uma sessão criada durante a checagem impede a exclusão e o conjunto volta a ficar disponível. Falhas na consulta também não autorizam remover os dados.
+
+
+### Exclusão de sessões
+
+DELETE `/api/v1/sessions/{id}` retorna HTTP 409 com `SESSION_IN_USE` enquanto houver qualquer processamento vinculado, independentemente de seu estado. Os IDs e estados dos vínculos são informados em `error.details[].runs`. A exclusão não remove processamentos, séries, resultados ou relatórios em cascata. Remova os processamentos por suas próprias ações antes de excluir uma sessão; cadastros sem vínculos retornam 204 e IDs inexistentes retornam 404.
+
+A proteção é aplicada na camada de armazenamento, com nova verificação após bloquear a criação de processamentos. Vínculos criados durante a validação ou falhas na consulta mantêm a sessão e seus dados disponíveis.

@@ -111,6 +111,7 @@ REQUIREMENTS = {
     "PAIRS_TRADING": ["eth_price", "eth_close"],
     "MACHINE_LEARNING": ["probability", "trained_until_ms", "model_id"],
     "MOMENTUM_RANKING": ["universe"],
+    "RANKING_CONFIRMATION": ["universe"],
 }
 
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "candlelab-api"
-version = "0.2.0"
+version = "0.3.0"
 description = "Laboratório local de backtests Binance Spot"
 requires-python = ">=3.11"
 dependencies = [
