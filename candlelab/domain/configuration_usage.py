@@ -1,4 +1,21 @@
-"""Deletion checks for saved individual configurations and embedded snapshots."""
+"""Deletion checks for saved configurations, combinations and embedded snapshots."""
+
+
+def base_strategies(definition):
+    """Match the frontend's conservative comparison of copies without origin IDs."""
+    ids = set()
+    pending = [definition]
+    while pending:
+        current = pending.pop()
+        if current.get("strategy_id"):
+            ids.add(current["strategy_id"])
+        for member in current.get("members") or []:
+            copy = member.get("combination")
+            if isinstance(copy, dict):
+                pending.append(copy)
+            elif member.get("strategy_id"):
+                ids.add(member["strategy_id"])
+    return ids
 
 
 def embedded_configuration_usage(definition, target):
@@ -10,7 +27,15 @@ def embedded_configuration_usage(definition, target):
         copy = member.get("combination")
         if not isinstance(copy, dict):
             continue
-        if copy.get("kind") == "strategy" and copy.get("strategy_id") == target["strategy_id"]:
+        same_base = False
+        if copy.get("kind") == target["kind"]:
+            if copy["kind"] == "custom":
+                same_base = copy.get("name") == target["name"] or base_strategies(
+                    copy
+                ) == base_strategies(target)
+            else:
+                same_base = copy.get("strategy_id") == target.get("strategy_id")
+        if same_base:
             if copy.get("name") == target["name"]:
                 return "linked"
             uncertain = True

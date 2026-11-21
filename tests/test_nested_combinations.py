@@ -116,7 +116,7 @@ def test_published_recipes_resolve_to_reusable_rules():
             assert all(component["strategy_id"] in REGISTRY for component in item["components"])
 
 
-def test_nested_snapshot_survives_source_changes_deletion_and_worker(client, store, rows):
+def test_nested_snapshot_survives_source_changes_and_blocked_deletion(client, store, rows):
     path = "/api/v1/strategy-combinations"
     origin = client.post(path, json=custom(buy_rule="any", sell_rule="all")).json()
     snapshot = {key: value for key, value in origin.items() if key != "id"}
@@ -126,7 +126,7 @@ def test_nested_snapshot_survives_source_changes_deletion_and_worker(client, sto
     derived = response.json()
     assert derived["members"][0]["combination"]["sell_rule"] == "all"
     assert client.put(path + "/" + origin["id"], json=custom(name="Changed")).status_code == 200
-    assert client.delete(path + "/" + origin["id"]).status_code == 204
+    assert client.delete(path + "/" + origin["id"]).status_code == 409
     dataset = upload(client, rows).json()
     sess = session(client, dataset["id"]).json()
     response = client.post(

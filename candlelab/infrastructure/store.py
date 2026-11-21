@@ -224,32 +224,33 @@ class MongoStore:
 
     def delete_combination(self, combination_id):
         target = self.combination(combination_id)
-        if target["kind"] == "strategy":
-            usage = configuration_usage(
-                target,
-                self.db.strategy_combinations.find(
-                    {"kind": "custom"}, {"id": 1, "name": 1, "members": 1}
-                ),
-                self.db.runs.find(
-                    {"combination_snapshot": {"$ne": None}},
-                    {"id": 1, "combination_snapshot": 1},
-                ),
+        configuration = target["kind"] == "strategy"
+        noun = "configuração" if configuration else "combinação"
+        usage = configuration_usage(
+            target,
+            self.db.strategy_combinations.find(
+                {"kind": "custom"}, {"id": 1, "name": 1, "members": 1}
+            ),
+            self.db.runs.find(
+                {"combination_snapshot": {"$ne": None}},
+                {"id": 1, "combination_snapshot": 1},
+            ),
+        )
+        if any(usage.values()):
+            raise AppError(
+                "CONFIGURATION_IN_USE" if configuration else "COMBINATION_IN_USE",
+                f"Esta {noun} não pode ser excluída: existem vínculos ou cópias "
+                "cuja origem não pode ser descartada.",
+                details=[
+                    {
+                        "field": "combination_id",
+                        "reason": f"Remova os vínculos antes de excluir a {noun}. "
+                        "Cópias sem identificador de origem exigem revisão.",
+                        **usage,
+                    }
+                ],
+                status=409,
             )
-            if any(usage.values()):
-                raise AppError(
-                    "CONFIGURATION_IN_USE",
-                    "Esta configuração não pode ser excluída: existem vínculos ou cópias "
-                    "cuja origem não pode ser descartada.",
-                    details=[
-                        {
-                            "field": "combination_id",
-                            "reason": "Remova os vínculos antes de excluir a configuração. "
-                            "Cópias sem identificador de origem exigem revisão.",
-                            **usage,
-                        }
-                    ],
-                    status=409,
-                )
         if not self.db.strategy_combinations.delete_one({"id": combination_id}).deleted_count:
             raise AppError("NOT_FOUND", "Combinação não encontrada.", status=404)
 

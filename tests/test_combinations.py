@@ -137,7 +137,7 @@ def test_votes_warmup_and_shared_fills(buy, sell, sides, ready, expected):
         },
     ],
 )
-def test_run_snapshot_survives_changes_and_deletion(client, store, rows, definition):
+def test_run_snapshot_survives_changes_and_blocked_deletion(client, store, rows, definition):
     dataset = upload(client, rows).json()
     sess = session(client, dataset["id"]).json()
     combo = client.post("/api/v1/strategy-combinations", json=definition).json()
@@ -157,12 +157,14 @@ def test_run_snapshot_survives_changes_and_deletion(client, store, rows, definit
         == 200
     )
     assert client.post(path, json=body, headers=headers).status_code == 409
-    assert client.delete("/api/v1/strategy-combinations/" + combo["id"]).status_code == 204
+    assert client.delete("/api/v1/strategy-combinations/" + combo["id"]).status_code == 409
     assert Worker(store).once()
     result = client.get("/api/v1/runs/" + run["id"]).json()
     assert result["status"] == "completed", result
     assert result["parameters"] == original
     assert result["combination_snapshot"] == combo
+    store.delete_run(run["id"])
+    assert client.delete("/api/v1/strategy-combinations/" + combo["id"]).status_code == 204
     assert client.post(path, json=body).status_code == 404
     assert client.post(path, json={**body, "strategy_id": "SMA_CROSS@1"}).status_code == 422
     assert client.post(path, json={**body, "parameters": {"short_window": 2}}).status_code == 422

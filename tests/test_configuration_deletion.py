@@ -11,6 +11,20 @@ from test_strategy_configurations import configuration
 PATH = "/api/v1/strategy-combinations"
 
 
+@pytest.fixture(params=["strategy", "custom", "preset"])
+def definition(request):
+    if request.param == "strategy":
+        return configuration()
+    if request.param == "custom":
+        return custom()
+    return {
+        "name": "EMA ADX configurada",
+        "kind": "preset",
+        "strategy_id": "EMA_ADX_ATR@1",
+        "parameters": {"short_window": 2, "long_window": 5},
+    }
+
+
 def save(client, definition):
     response = client.post(PATH, json=definition)
     assert response.status_code == 201, response.text
@@ -45,27 +59,32 @@ def blocked(client, saved):
     assert response.status_code == 409, response.text
     body = response.json()
     ErrorResponse.model_validate(body)
-    assert body["error"]["code"] == "CONFIGURATION_IN_USE"
+    assert body["error"]["code"] == (
+        "CONFIGURATION_IN_USE" if saved["kind"] == "strategy" else "COMBINATION_IN_USE"
+    )
     assert saved["id"] in {item["id"] for item in client.get(PATH).json()["items"]}
     return body["error"]["details"][0]
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "completed", "failed"])
-def test_direct_run_blocks_in_every_state_after_source_edits(client, store, status):
-    saved = save(client, configuration())
+def test_direct_run_blocks_in_every_state_after_source_edits(client, store, status, definition):
+    saved = save(client, definition)
     run_record(store, saved, status=status)
-    response = client.put(
-        PATH + "/" + saved["id"],
-        json=configuration(name="SMA editada", parameters={"short_window": 3, "long_window": 8}),
-    )
+    edited = snapshot(saved)
+    edited["name"] = "Cadastro editado"
+    if edited["kind"] == "custom":
+        edited["members"][0]["parameters"] = {"short_window": 3, "long_window": 8}
+    else:
+        edited["parameters"] = {**edited["parameters"], "short_window": 3, "long_window": 8}
+    response = client.put(PATH + "/" + saved["id"], json=edited)
     assert response.status_code == 200, response.text
     detail = blocked(client, response.json())
     assert detail["runs"] == ["linked-run"]
     assert detail["combinations"] == []
 
 
-def test_nested_group_blocks_and_removing_group_allows_deletion(client):
-    saved = save(client, configuration())
+def test_nested_group_blocks_and_removing_group_allows_deletion(client, definition):
+    saved = save(client, definition)
     parent = save(client, group("Grupo externo", group("Grupo interno", snapshot(saved))))
     detail = blocked(client, saved)
     assert detail["combinations"] == [parent["name"]]
@@ -74,44 +93,47 @@ def test_nested_group_blocks_and_removing_group_allows_deletion(client):
     assert client.delete(PATH + "/" + saved["id"]).status_code == 204
 
 
-def test_historical_nested_copy_blocks_after_parent_was_deleted(client, store):
-    saved = save(client, configuration())
+def test_historical_nested_copy_blocks_after_parent_was_deleted(client, store, definition):
+    saved = save(client, definition)
     parent = save(client, group("Grupo histórico", group("Grupo interno", snapshot(saved))))
     run_record(store, parent)
-    assert client.delete(PATH + "/" + parent["id"]).status_code == 204
+    assert client.delete(PATH + "/" + parent["id"]).status_code == 409
+    # Historical data may contain parents removed before this restriction existed.
+    store.db.strategy_combinations.delete_one({"id": parent["id"]})
     detail = blocked(client, saved)
     assert detail["runs"] == ["linked-run"]
     assert detail["combinations"] == []
     assert store.db.runs.find_one({"id": "linked-run"})["combination_snapshot"] == parent
 
 
-def test_other_configuration_using_same_base_does_not_block_direct_run(client, store):
-    saved = save(client, configuration())
-    other = save(
-        client,
-        configuration(name="Outra SMA", parameters={"short_window": 3, "long_window": 8}),
-    )
+def test_other_configuration_using_same_base_does_not_block_direct_run(client, store, definition):
+    saved = save(client, definition)
+    other = save(client, {**definition, "name": "Outro cadastro"})
     run_record(store, other)
     assert client.delete(PATH + "/" + saved["id"]).status_code == 204
     assert store.combination(other["id"]) == other
     assert store.db.runs.find_one({"id": "linked-run"})["combination_snapshot"] == other
 
 
-def test_unlinked_configuration_and_missing_id(client):
-    saved = save(client, configuration())
+def test_unlinked_configuration_and_missing_id(client, definition):
+    saved = save(client, definition)
     assert client.delete(PATH + "/" + saved["id"]).status_code == 204
     assert client.delete(PATH + "/" + saved["id"]).status_code == 404
     assert client.delete(PATH + "/missing").status_code == 404
 
 
 @pytest.mark.parametrize("historical", [False, True])
-def test_ambiguous_copy_is_reported_instead_of_assuming_it_is_unrelated(client, store, historical):
-    saved = save(client, configuration())
-    copy = configuration(name="Nome antigo", parameters={"short_window": 3, "long_window": 8})
+def test_ambiguous_copy_is_reported_instead_of_assuming_it_is_unrelated(
+    client, store, historical, definition
+):
+    saved = save(client, definition)
+    copy = {**definition, "name": "Nome antigo"}
     parent = save(client, group("Grupo com cópia sem ID", copy))
     if historical:
         run_record(store, parent)
-        assert client.delete(PATH + "/" + parent["id"]).status_code == 204
+        assert client.delete(PATH + "/" + parent["id"]).status_code == 409
+        # Historical data may contain parents removed before this restriction existed.
+        store.db.strategy_combinations.delete_one({"id": parent["id"]})
     detail = blocked(client, saved)
     assert detail["uncertain_copies"] == [
         "Processamento: linked-run" if historical else f"Combinação: {parent['name']}"
@@ -120,8 +142,8 @@ def test_ambiguous_copy_is_reported_instead_of_assuming_it_is_unrelated(client, 
     assert detail["combinations"] == []
 
 
-def test_usage_scan_is_not_limited_to_a_page_of_records(client, store):
-    saved = save(client, configuration())
+def test_usage_scan_is_not_limited_to_a_page_of_records(client, store, definition):
+    saved = save(client, definition)
     other = {**saved, "id": "unrelated-source"}
     for index in range(150):
         run_record(store, other, run_id=f"unrelated-{index}")
@@ -129,8 +151,8 @@ def test_usage_scan_is_not_limited_to_a_page_of_records(client, store):
     assert blocked(client, saved)["runs"] == ["last-linked-run"]
 
 
-def test_data_access_failure_does_not_remove_configuration(client, store, monkeypatch):
-    saved = save(client, configuration())
+def test_data_access_failure_does_not_remove_configuration(client, store, monkeypatch, definition):
+    saved = save(client, definition)
 
     def unavailable(*args, **kwargs):
         raise OperationFailure("temporarily unavailable")
@@ -141,11 +163,13 @@ def test_data_access_failure_does_not_remove_configuration(client, store, monkey
     assert store.combination(saved["id"]) == saved
 
 
-def test_store_cannot_bypass_the_deletion_restriction(client, store):
-    saved = save(client, configuration())
+def test_store_cannot_bypass_the_deletion_restriction(client, store, definition):
+    saved = save(client, definition)
     run_record(store, saved)
     with pytest.raises(AppError) as exc:
         store.delete_combination(saved["id"])
     assert exc.value.status == 409
-    assert exc.value.code == "CONFIGURATION_IN_USE"
+    assert exc.value.code == (
+        "CONFIGURATION_IN_USE" if saved["kind"] == "strategy" else "COMBINATION_IN_USE"
+    )
     assert store.combination(saved["id"]) == saved
