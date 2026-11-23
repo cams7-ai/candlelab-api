@@ -32,10 +32,13 @@ def combinable(strategy_id, spec):
 
     return (
         strategy_id in COMBINABLE_IDS or strategy_id.removesuffix("@1") in COMPONENT_FIELDS
-    ) and not spec.required_data
+    ) and (not spec.required_data or strategy_id == "RANKING_CONFIRMATION@1")
 
 
 class Member(Parameters):
+    auxiliary_filename: str | None = Field(
+        default=None, min_length=1, max_length=255, exclude_if=lambda value: value is None
+    )
     strategy_id: str = Field(default="", max_length=100)
     parameters: dict[str, Any] = Field(default_factory=dict)
     combination: "CombinationDefinition | None" = None
@@ -43,7 +46,7 @@ class Member(Parameters):
     @model_validator(mode="after")
     def exclusive(self):
         if self.combination is not None:
-            if self.strategy_id or self.parameters:
+            if self.strategy_id or self.parameters or self.auxiliary_filename:
                 raise ValueError("Um grupo recebe somente o snapshot da combinação.")
         elif not self.strategy_id:
             raise ValueError("Informe a estratégia ou a combinação.")
@@ -51,6 +54,9 @@ class Member(Parameters):
 
 
 class CombinationDefinition(Parameters):
+    auxiliary_filename: str | None = Field(
+        default=None, min_length=1, max_length=255, exclude_if=lambda value: value is None
+    )
     name: str = Field(min_length=1, max_length=200)
     kind: Literal["preset", "custom", "strategy"]
     strategy_id: str | None = None
@@ -146,6 +152,28 @@ def validate_tree(definition, depth=1, counter=None):
                 counter[0] += 1
     if counter[0] > 64:
         raise ValueError("Combinações aceitam até 64 estratégias no total.")
+
+
+def auxiliary_sources(strategy_id, parameters):
+    """Yield each auxiliary leaf, including snapshots embedded in nested groups."""
+    from candlelab.domain.strategies import REGISTRY
+
+    if strategy_id == CUSTOM_ID:
+        definition = CombinationDefinition.model_validate_json(parameters["definition_json"])
+        yield from definition_auxiliary_sources(definition)
+    elif REGISTRY[strategy_id].required_data:
+        yield strategy_id, parameters
+
+
+def definition_auxiliary_sources(definition):
+    if definition.kind != "custom":
+        yield from auxiliary_sources(definition.strategy_id, definition.parameters)
+        return
+    for member in definition.members:
+        if member.combination is not None:
+            yield from definition_auxiliary_sources(member.combination)
+        else:
+            yield from auxiliary_sources(member.strategy_id, member.parameters)
 
 
 GRID_IDS = {"GRID_TRADING@1", "GRID_ADX_ATR@1"}

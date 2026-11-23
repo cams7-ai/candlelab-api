@@ -31,6 +31,7 @@ class Service:
 
     def run(self, session_id, request, key):
         combination_snapshot = None
+        auxiliary_filename = request.auxiliary_filename
         strategy_id, raw_parameters = request.strategy_id, request.parameters
         if request.combination_id:
             from candlelab.domain.combinations import CombinationDefinition, CUSTOM_ID
@@ -44,30 +45,33 @@ class Service:
                 raw_parameters = {"definition_json": json.dumps(definition.model_dump())}
             else:
                 strategy_id, raw_parameters = definition.strategy_id, definition.parameters
+                auxiliary_filename = definition.auxiliary_filename
         spec, parameters = resolve(strategy_id, raw_parameters)
         session = self.store.session(session_id)
         dataset = self.store.dataset(session["dataset_id"])
         instrument = self.settings.instrument(dataset["symbol"], dataset["interval"])
-        if spec.required_data:
+        from candlelab.domain.combinations import auxiliary_sources
+
+        sources = list(auxiliary_sources(strategy_id, parameters.model_dump()))
+        if sources:
             from candlelab.domain.tutorial_data import rows_from_json
 
-            rows = rows_from_json(parameters.auxiliary_json, strategy_id.split("@")[0])
             times = {c.open_time_ms for c in self.store.candles(dataset["id"])}
-            if set(rows) != times:
-                raise invalid(
-                    "auxiliary_json",
-                    "Forneça exatamente uma observação por abertura do dataset, sem faltas ou timestamps extras.",
-                )
-            if (
-                strategy_id in ("PAIRS_TRADING@1", "MOMENTUM_RANKING@1")
-                and dataset["symbol"] != "BTCUSDT"
-            ):
-                raise invalid("strategy_id", "Esta estratégia relativa exige dataset BTCUSDT.")
+            for source_id, source_parameters in sources:
+                rows = rows_from_json(source_parameters["auxiliary_json"], source_id.split("@")[0])
+                if set(rows) != times:
+                    raise invalid(
+                        "auxiliary_json",
+                        "Forneça exatamente uma observação por abertura do dataset, sem faltas ou timestamps extras.",
+                    )
+                if (
+                    source_id in ("PAIRS_TRADING@1", "MOMENTUM_RANKING@1", "RANKING_CONFIRMATION@1")
+                    and dataset["symbol"] != "BTCUSDT"
+                ):
+                    raise invalid("strategy_id", "Esta estratégia relativa exige dataset BTCUSDT.")
         policy = {
             "engine_version": ENGINE_VERSION if spec.category == "legacy" else "CANDLELAB_ENGINE@2",
-            "strategy_data_policy": "AUXILIARY_OPEN_SNAPSHOT@1"
-            if spec.required_data
-            else "OHLCV@1",
+            "strategy_data_policy": "AUXILIARY_OPEN_SNAPSHOT@1" if sources else "OHLCV@1",
             "execution_policy": EXECUTION_POLICY
             if spec.category == "legacy"
             else "TUTORIAL_NEXT_OPEN_LIMITS_COLLATERAL@1",
@@ -85,6 +89,6 @@ class Service:
             parameters.model_dump(),
             key,
             policy,
-            auxiliary_filename=request.auxiliary_filename,
+            auxiliary_filename=auxiliary_filename,
             combination_snapshot=combination_snapshot,
         )

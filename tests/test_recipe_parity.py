@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from candlelab.domain.combinations import CombinationDefinition
 from candlelab.domain.strategies import REGISTRY, catalog
 from test_composition_regression import scenarios
-from test_tutorial import candles, run
+from test_tutorial import auxiliary, candles, run
 
 RECIPES = ["EMA_ADX_ATR", "RSI_BOLLINGER", "BREAKOUT_VOLUME_ATR", "MACD_EMA_RSI", "GRID_ADX_ATR"]
 
@@ -102,20 +102,16 @@ def test_every_published_parameter_exists_in_its_individual_components(kind):
     assert set(spec.parameters.model_fields) <= fields
 
 
-def test_external_ranking_is_explicitly_unavailable_for_ohlcv_composition():
+def test_ranking_filter_is_combinable_but_published_recipe_is_not():
     items = {item["id"]: item for item in catalog()}
-    for key in ("MOMENTUM_RANKING@1", "RANKING_CONFIRMATION@1"):
-        assert items[key]["required_data"] == ["universe"]
-        assert not items[key]["combinable"]
-    with pytest.raises(ValidationError, match="incompatível"):
-        CombinationDefinition.model_validate(
-            composed_definition(
-                "MOMENTUM_RANKING",
-                {
-                    "auxiliary_json": '[{"open_time_ms":60000,"universe":{"BTCUSDT":{"roc":"1","liquidity":"1000001"}}}]'
-                },
-            )
-        )
+    assert items["RANKING_CONFIRMATION@1"]["required_data"] == ["universe"]
+    assert items["RANKING_CONFIRMATION@1"]["combinable"]
+    assert not items["MOMENTUM_RANKING@1"]["combinable"]
+    data = candles([100] * 30)
+    definition = composed_definition(
+        "MOMENTUM_RANKING", {"auxiliary_json": json.dumps(auxiliary(data))}
+    )
+    CombinationDefinition.model_validate(definition)
 
 
 def test_atr_spacing_changes_limits_and_is_causal():

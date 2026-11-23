@@ -128,7 +128,7 @@ def rows_from_json(value, kind):
             for key in REQUIREMENTS[kind]:
                 if getattr(row, key) is None:
                     raise ValueError(f"Campo auxiliar obrigatório: {key}.")
-            if kind == "MOMENTUM_RANKING" and (
+            if kind in ("MOMENTUM_RANKING", "RANKING_CONFIRMATION") and (
                 not row.universe or "BTCUSDT" not in row.universe or len(row.universe) < 2
             ):
                 raise ValueError("Ranking exige BTCUSDT e pelo menos outro ativo.")
