@@ -81,7 +81,7 @@ def test_rejects_missing_signal_incompatible_groups_and_bounds():
         CombinationDefinition.model_validate(
             custom(
                 members=[
-                    group({"name": "Grid", "kind": "preset", "strategy_id": "GRID_ADX_ATR@1"}),
+                    group({"name": "DCA", "kind": "strategy", "strategy_id": "DCA@1"}),
                     {"strategy_id": "SMA_CROSS@1"},
                 ]
             )

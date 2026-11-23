@@ -131,20 +131,36 @@ def grid(f):
     s = f.state
     f.ready = f.support is not None and f.resistance is not None and f.resistance > f.support
     enhanced = f.kind == "GRID_ADX_ATR"
+    atr_spacing = enhanced or getattr(f.p, "spacing_mode", "range") == "atr"
+    if atr_spacing:
+        f.ready = f.ready and f.atr is not None
     if enhanced:
         f.ready = f.ready and f.adx is not None and f.atr is not None
+    regimes = [
+        regime.last_evaluation
+        for regime in s.grid_regimes
+        if regime.last_open_time_ms == f.c.open_time_ms
+    ]
+    if s.grid_regimes:
+        f.ready = (
+            f.ready
+            and len(regimes) == len(s.grid_regimes)
+            and all(result is not None and result.ready for result in regimes)
+        )
     if f.ready and s.center is None:
         s.center = (f.resistance + f.support) / 2
         s.spacing = (
-            f.atr * D(f.p.atr_multiple) if enhanced else (f.resistance - f.support) / f.p.levels
+            f.atr * D(f.p.atr_multiple) if atr_spacing else (f.resistance - f.support) / f.p.levels
         )
         s.grid_low, s.grid_high = f.support, f.resistance
     if s.center is not None:
         s.disabled |= f.c.close < s.grid_low or f.c.close > s.grid_high
+        s.disabled |= any(result.ready and not result.buy_allowed for result in regimes)
 
 
 def grid_regime(f):
     if f.kind == "GRID_REGIME":
+        f.values.update(adx=f.adx, atr=f.atr)
         f.ready = f.adx is not None and f.atr is not None
         f.buy = f.ready and f.adx < D(f.p.adx_limit)
         return
@@ -159,6 +175,10 @@ def grid_orders(f):
     f.values = {"grid_center": s.center, "grid_lower": s.grid_low, "grid_upper": s.grid_high}
     if f.kind == "GRID_ADX_ATR":
         f.values.update(adx=f.adx, atr=f.atr)
+    elif getattr(f.p, "spacing_mode", "range") == "atr":
+        f.values["atr"] = f.atr
+    elif getattr(f.p, "spacing_mode", "range") == "atr":
+        f.values["atr"] = f.atr
     if s.disabled:
         f.sell, f.reason = s.position, "GRID_DISABLED"
     elif s.position:

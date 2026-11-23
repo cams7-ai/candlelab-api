@@ -9,6 +9,8 @@ from candlelab.domain.strategy_types import Parameters, Evaluation, StrategySpec
 
 CUSTOM_ID = "CUSTOM_COMBINATION@1"
 COMBINABLE_IDS = {
+    "GRID_TRADING@1",
+    "GRID_ADX_ATR@1",
     "SMA_CROSS@1",
     "EMA_CROSS@1",
     "RSI_REVERSION@1",
@@ -99,6 +101,24 @@ class CombinationDefinition(Parameters):
                 _, parsed = resolve(member.strategy_id, member.parameters)
                 member.parameters = parsed.model_dump()
             validate_tree(self)
+            if grid_count(self) > 1:
+                raise ValueError("Use somente uma grade por combinação, incluindo grupos internos.")
+            if not grid_count(self) and any(
+                (
+                    member.combination.strategy_id
+                    if member.combination is not None
+                    else member.strategy_id
+                )
+                == "GRID_REGIME@1"
+                and (
+                    member.combination.parameters
+                    if member.combination is not None
+                    else member.parameters
+                ).get("regime_action", "filter")
+                == "disable_grid"
+                for member in self.members
+            ):
+                raise ValueError("A ação Desativar grade exige uma grade na mesma composição.")
             if not has_signal(self):
                 raise ValueError(
                     "Inclua pelo menos uma estratégia de sinal, além de filtros e saídas."
@@ -126,6 +146,28 @@ def validate_tree(definition, depth=1, counter=None):
                 counter[0] += 1
     if counter[0] > 64:
         raise ValueError("Combinações aceitam até 64 estratégias no total.")
+
+
+GRID_IDS = {"GRID_TRADING@1", "GRID_ADX_ATR@1"}
+
+
+def grid_count(definition):
+    if definition.kind != "custom":
+        return int(definition.strategy_id in GRID_IDS)
+    return sum(
+        grid_count(member.combination)
+        if member.combination is not None
+        else int(member.strategy_id in GRID_IDS)
+        for member in definition.members
+    )
+
+
+def grid_member(member):
+    return (
+        grid_count(member.combination) > 0
+        if member.combination is not None
+        else member.strategy_id in GRID_IDS
+    )
 
 
 def has_signal(definition):
@@ -191,21 +233,64 @@ class CombinedStrategy:
             spec, parsed = resolve(strategy_id, parameters)
             self.strategies.append(spec.factory(parsed))
 
+        # Filters are evaluated before signals. A disabling regime is bound to
+        # the single grid in this group (which can be inside a nested group).
+        grid = self.grid_strategy()
+        regimes = [
+            strategy
+            for strategy in self.strategies
+            if getattr(strategy, "kind", None) == "GRID_REGIME"
+            and strategy.p.regime_action == "disable_grid"
+        ]
+        if regimes and grid is None:
+            raise ValueError("A ação Desativar grade exige uma grade na mesma composição.")
+        if grid is not None:
+            grid.grid_regimes.extend(regimes)
+
+    def grid_strategy(self):
+        for strategy in self.strategies:
+            if isinstance(strategy, CombinedStrategy):
+                grid = strategy.grid_strategy()
+                if grid is not None:
+                    return grid
+            elif getattr(strategy, "kind", None) in ("GRID_TRADING", "GRID_ADX_ATR"):
+                return strategy
+        return None
+
     def on_fill(self, side, price):
         for strategy in self.strategies:
             if hasattr(strategy, "on_fill"):
                 strategy.on_fill(side, price)
 
     def on_close(self, candle):
-        evaluations = [strategy.on_close(candle) for strategy in self.strategies]
+        # Disabling filters must publish the current candle before a nested grid
+        # initializes its range or generates a limit order. Keep result ordering
+        # unchanged for member prefixes and voting.
+        roles = [member_role(member) for member in self.definition.members]
+        evaluations = [None] * len(self.strategies)
+        for filter_pass in (True, False):
+            for index, (strategy, role) in enumerate(zip(self.strategies, roles)):
+                if (role == "filter") == filter_pass:
+                    evaluations[index] = strategy.on_close(candle)
         values = {
             f"member_{index + 1}__{key}": value
             for index, result in enumerate(evaluations)
             for key, value in result.values.items()
         }
+        grid = next(
+            (
+                result
+                for member, result in zip(self.definition.members, evaluations)
+                if grid_member(member)
+            ),
+            None,
+        )
+        # A disabled grid or its stop must close the inventory even while another
+        # component warms up, and must never inherit a stale take-profit limit.
+        if grid is not None and grid.ready and grid.side == "SELL" and grid.order is None:
+            return Evaluation(values, True, "SELL", grid.reason)
         if not all(result.ready for result in evaluations):
             return Evaluation(values, False, None, "COMBINATION_WARMUP")
-        roles = [member_role(member) for member in self.definition.members]
         permitted = all(
             result.buy_allowed for result, role in zip(evaluations, roles) if role == "filter"
         )
@@ -218,8 +303,19 @@ class CombinedStrategy:
                 if role == "signal" or (side == "SELL" and role == "exit")
             ]
             matched = bool(votes) and (all(votes) if rule == "all" else any(votes))
+            if side == "BUY" and grid is not None:
+                matched = matched and grid.side == "BUY"
             if matched and (side == "SELL" or permitted):
-                return Evaluation(values, True, side, f"COMBINATION_{rule.upper()}_{side}")
+                order = None
+                if grid is not None and grid.side == side:
+                    # An additional market exit takes precedence over grid profit
+                    # limits. Entry sizing and limits always belong to the grid.
+                    market_exit = side == "SELL" and any(
+                        result.side == "SELL" and result.order is None for result in evaluations
+                    )
+                    if not market_exit:
+                        order = grid.order
+                return Evaluation(values, True, side, f"COMBINATION_{rule.upper()}_{side}", order)
         return Evaluation(values, True, None, "COMBINATION_NO_CONSENSUS")
 
 

@@ -1,6 +1,9 @@
 """Executable rules from the tutorial, with explicit simulation assumptions."""
 
 from collections import deque
+from typing import Literal
+
+from pydantic import Field
 from decimal import Decimal as D, localcontext
 
 from candlelab.domain.components import RECIPES, RULES, RuleContext, evaluate_rules, atr_exit
@@ -54,7 +57,20 @@ DEFINITIONS = [
     (
         "GRID_TRADING",
         "Grid Trading",
-        GRID,
+        {
+            **GRID,
+            "spacing_mode": (
+                Literal["range", "atr"],
+                Field(
+                    default="range",
+                    title="Modo de espaçamento",
+                    description="Por níveis mantém a grade original; ATR usa o multiplicador de espaçamento.",
+                    json_schema_extra={"x-enum-labels": {"range": "Por níveis", "atr": "Por ATR"}},
+                ),
+            ),
+            "atr_period": (Window, 14),
+            "atr_multiple": number("1", "Espaçamento ATR", "0.1", "20"),
+        },
         "Grade congelada na primeira janela; uma ordem por candle e um lote de inventário por ciclo.",
         "Ordens limitadas simuladas pelo OHLC; sem fila ou fills parciais.",
     ),
@@ -216,7 +232,24 @@ COMPONENT_FIELDS = {
     ),
     "GRID_REGIME": (
         "Regime de grade ADX",
-        {"atr_period": (Window, 14), "adx_limit": number("20", "ADX máximo", "0", "100")},
+        {
+            "atr_period": (Window, 14),
+            "adx_limit": number("20", "ADX máximo", "0", "100"),
+            "regime_action": (
+                Literal["filter", "disable_grid"],
+                Field(
+                    default="filter",
+                    title="Ação ao atingir o ADX máximo",
+                    description="Filtrar compras permite retomar. Desativar grade encerra a posição e impede novas compras na grade desta composição.",
+                    json_schema_extra={
+                        "x-enum-labels": {
+                            "filter": "Filtrar compras",
+                            "disable_grid": "Desativar grade",
+                        }
+                    },
+                ),
+            ),
+        },
         "filter",
     ),
     "RANKING_CONFIRMATION": (
@@ -272,7 +305,7 @@ COMPONENT_FIELDS = {
 FILTER_KINDS = {kind for kind, (_, _, role) in COMPONENT_FIELDS.items() if role == "filter"}
 COMPONENT_RULES = {
     "RSI_CONFIRMATION": "Permite compras com RSI igual ou acima do limiar.",
-    "GRID_REGIME": "Permite compras com ADX abaixo do limite; na receita de grade desliga a grade ao atingir o limite.",
+    "GRID_REGIME": "Permite compras com ADX abaixo do limite; pode desativar permanentemente a grade da composição ao atingir o limite.",
     "RANKING_CONFIRMATION": "Permite compras quando BTC está no ranking líquido; requer universo externo.",
     "EMA_DIRECTION": "EMA curta acima da longa, fechamento acima da curta e candle de alta; saída abaixo da longa.",
     "ADX_CONFIRMATION": "Permite compras somente com ADX acima do limiar, após aquecimento ADX/ATR.",
@@ -287,9 +320,22 @@ COMPONENT_RULES = {
 
 
 def recipe_components(kind):
-    # Internal order helpers are not independent trading signals.
+    # Publish fixed component options as well as the recipe's numeric parameters.
+    # These options distinguish a recipe from the standalone component defaults.
+    overrides = (
+        {
+            "GRID_TRADING": {"spacing_mode": "atr"},
+            "GRID_REGIME": {"regime_action": "disable_grid"},
+        }
+        if kind == "GRID_ADX_ATR"
+        else {}
+    )
     return [
-        {"strategy_id": item + "@1", "role": COMPONENT_FIELDS.get(item, (None, None, "signal"))[2]}
+        {
+            "strategy_id": item + "@1",
+            "role": COMPONENT_FIELDS.get(item, (None, None, "signal"))[2],
+            **({"parameter_overrides": overrides[item]} if item in overrides else {}),
+        }
         for item in RECIPES.get(kind, ())
         if item != "GRID_ORDERS"
     ]
@@ -322,6 +368,9 @@ class TutorialStrategy:
         self.vwap_total = self.vwap_volume = D(0)
         self.day = None
         self.disabled = False
+        self.grid_regimes = []
+        self.last_evaluation = None
+        self.last_open_time_ms = None
 
     def on_fill(self, side, price):
         if side == "BUY":
@@ -340,7 +389,10 @@ class TutorialStrategy:
 
     def on_close(self, c):
         with localcontext(INDICATOR_CONTEXT):
-            return self._close(c)
+            result = self._close(c)
+            self.last_evaluation = result
+            self.last_open_time_ms = c.open_time_ms
+            return result
 
     def _close(self, c):
         p, kind, old = self.p, self.kind, self.previous

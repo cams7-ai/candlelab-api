@@ -77,7 +77,7 @@ def test_catalog_and_preset_validation(client):
     assert len(items) == 34
     by_id = {item["id"]: item for item in items}
     assert by_id["SMA_CROSS@1"]["combinable"]
-    assert not by_id["GRID_ADX_ATR@1"]["combinable"]
+    assert by_id["GRID_ADX_ATR@1"]["combinable"]
     assert not by_id["MACHINE_LEARNING@1"]["combinable"]
     for key in ("missing", "SMA_CROSS@1", "CUSTOM_COMBINATION@1"):
         assert (
